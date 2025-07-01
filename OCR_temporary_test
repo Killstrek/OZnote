@@ -1,0 +1,589 @@
+<?php
+
+/**
+ * Simple Debug OCR - No External Dependencies
+ * This version will help identify the exact error causing HTTP 500
+ */
+
+// Enable error reporting to see what's causing the 500 error
+error_reporting(E_ALL);
+ini_set('display_errors', 1);
+ini_set('log_errors', 1);
+
+// Create error log function
+function logError($message)
+{
+    $logDir = 'debug_logs/';
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0755, true);
+    }
+    $logFile = $logDir . 'error_' . date('Y-m-d') . '.log';
+    $timestamp = date('Y-m-d H:i:s');
+    $logEntry = "[$timestamp] $message\n";
+    @file_put_contents($logFile, $logEntry, FILE_APPEND | LOCK_EX);
+}
+
+// Log the start
+logError("=== SCRIPT STARTED ===");
+logError("PHP Version: " . phpversion());
+
+// Check if we can get this far
+echo "<!-- Debug: Script started successfully -->\n";
+
+// Simple Cloud OCR class without external dependencies
+class SimpleCloudOCR
+{
+    private $apiKey;
+    private $apiUrl = 'https://api.ocr.space/parse/image';
+
+    public function __construct($apiKey = 'K83046822188957')
+    {
+        $this->apiKey = $apiKey;
+        logError("CloudOCR class initialized");
+    }
+
+    public function extractText($imagePath, $language = 'auto')
+    {
+        logError("Starting OCR extraction for: $imagePath");
+
+        // Check if file exists
+        if (!file_exists($imagePath)) {
+            throw new Exception("Image file not found: $imagePath");
+        }
+
+        // Check file size
+        $fileSize = filesize($imagePath);
+        if ($fileSize > 1024 * 1024) { // 1MB limit
+            throw new Exception("File too large. Maximum size is 1MB for free API.");
+        }
+
+        // Check if cURL is available
+        if (!function_exists('curl_init')) {
+            throw new Exception("cURL is not available on this server.");
+        }
+
+        // Check if CURLFile class exists (PHP 5.5+)
+        if (!class_exists('CURLFile')) {
+            // Fallback for older PHP versions
+            $postData = array(
+                'apikey' => $this->apiKey,
+                'language' => $language,
+                'isOverlayRequired' => 'false',
+                'detectOrientation' => 'true',
+                'scale' => 'true',
+                'OCREngine' => '2',
+                'file' => '@' . $imagePath
+            );
+        } else {
+            // Modern PHP version
+            $postData = array(
+                'apikey' => $this->apiKey,
+                'language' => $language,
+                'isOverlayRequired' => 'false',
+                'detectOrientation' => 'true',
+                'scale' => 'true',
+                'OCREngine' => '2',
+                'file' => new CURLFile($imagePath)
+            );
+        }
+
+        logError("Sending request to OCR API");
+
+        // Initialize cURL
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $this->apiUrl);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $postData);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+        curl_setopt($ch, CURLOPT_USERAGENT, 'PHP OCR Client 1.0');
+
+        // Execute request
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
+
+        curl_close($ch);
+
+        logError("API Response Code: $httpCode");
+
+        // Check for cURL errors
+        if ($curlError) {
+            logError("cURL Error: $curlError");
+            throw new Exception("Network error: $curlError");
+        }
+
+        // Check HTTP response code
+        if ($httpCode !== 200) {
+            logError("HTTP Error: $httpCode");
+            throw new Exception("API request failed with HTTP code: $httpCode");
+        }
+
+        // Parse JSON response
+        $result = json_decode($response, true);
+
+        if (!$result) {
+            logError("JSON Decode Error: " . json_last_error_msg());
+            throw new Exception("Invalid API response: Unable to parse JSON");
+        }
+
+        // Check for API errors
+        if (isset($result['IsErroredOnProcessing']) && $result['IsErroredOnProcessing']) {
+            $errorMessage = isset($result['ErrorMessage']) ? $result['ErrorMessage'] : 'Unknown API error';
+            logError("OCR API Error: $errorMessage");
+            throw new Exception("OCR API Error: $errorMessage");
+        }
+
+        // Check if we have results
+        if (!isset($result['ParsedResults']) || empty($result['ParsedResults'])) {
+            logError("No results from OCR API");
+            throw new Exception("No text could be extracted from the image");
+        }
+
+        // Extract text from all parsed results
+        $extractedText = '';
+        foreach ($result['ParsedResults'] as $parsedResult) {
+            if (isset($parsedResult['ParsedText'])) {
+                $extractedText .= $parsedResult['ParsedText'];
+            }
+        }
+
+        logError("OCR completed successfully. Text length: " . strlen($extractedText));
+        return trim($extractedText);
+    }
+
+    public function getSupportedLanguages()
+    {
+        return array(
+            'eng' => 'English',
+            'ara' => 'Arabic',
+            'bul' => 'Bulgarian',
+            'chs' => 'Chinese (Simplified)',
+            'cht' => 'Chinese (Traditional)',
+            'hrv' => 'Croatian',
+            'cze' => 'Czech',
+            'dan' => 'Danish',
+            'dut' => 'Dutch',
+            'fin' => 'Finnish',
+            'fre' => 'French',
+            'ger' => 'German',
+            'gre' => 'Greek',
+            'hun' => 'Hungarian',
+            'kor' => 'Korean',
+            'ita' => 'Italian',
+            'jpn' => 'Japanese',
+            'pol' => 'Polish',
+            'por' => 'Portuguese',
+            'rus' => 'Russian',
+            'slv' => 'Slovenian',
+            'spa' => 'Spanish',
+            'swe' => 'Swedish',
+            'tur' => 'Turkish',
+            'tha' => 'Thai'
+        );
+    }
+}
+
+// Initialize variables
+$uploadDir = 'uploads/';
+$resultsDir = 'ocr_results/';
+$errorMessage = '';
+$successMessage = '';
+$extractedText = '';
+$selectedLanguage = 'eng';
+
+logError("Variables initialized");
+
+// Create directories if they don't exist
+try {
+    if (!is_dir($uploadDir)) {
+        if (!mkdir($uploadDir, 0755, true)) {
+            throw new Exception("Could not create uploads directory");
+        }
+    }
+
+    if (!is_dir($resultsDir)) {
+        if (!mkdir($resultsDir, 0755, true)) {
+            throw new Exception("Could not create results directory");
+        }
+    }
+
+    logError("Directories created/verified");
+} catch (Exception $e) {
+    logError("Directory creation error: " . $e->getMessage());
+    $errorMessage = "Error: " . $e->getMessage();
+}
+
+// Check if uploads directory is writable
+if (is_dir($uploadDir) && !is_writable($uploadDir)) {
+    $errorMessage = "Error: Uploads directory is not writable. Please check permissions.";
+    logError("Uploads directory not writable");
+}
+
+// Check for form submission
+$formSubmitted = false;
+if ($_SERVER['REQUEST_METHOD'] == 'POST') {
+    logError("POST request received");
+
+    // Multiple ways to detect form submission
+    if (isset($_POST['submit']) || isset($_POST['extract_text']) || !empty($_FILES['file']['name'])) {
+        $formSubmitted = true;
+        logError("Form submission detected");
+    } else {
+        logError("POST request but no form submission detected");
+    }
+}
+
+// Process form submission
+if ($formSubmitted && empty($errorMessage)) {
+    logError("Processing form submission");
+
+    if (isset($_FILES['file'])) {
+        // Get selected language
+        $selectedLanguage = isset($_POST['language']) ? $_POST['language'] : 'eng';
+        logError("Selected language: $selectedLanguage");
+
+        // Check for upload errors
+        if ($_FILES['file']['error'] !== UPLOAD_ERR_OK) {
+            $uploadError = $_FILES['file']['error'];
+            logError("Upload error code: $uploadError");
+
+            switch ($uploadError) {
+                case UPLOAD_ERR_INI_SIZE:
+                case UPLOAD_ERR_FORM_SIZE:
+                    $errorMessage = "File is too large. Please upload a smaller image.";
+                    break;
+                case UPLOAD_ERR_PARTIAL:
+                    $errorMessage = "File was only partially uploaded. Please try again.";
+                    break;
+                case UPLOAD_ERR_NO_FILE:
+                    $errorMessage = "No file was uploaded. Please select an image.";
+                    break;
+                case UPLOAD_ERR_NO_TMP_DIR:
+                    $errorMessage = "Server error: Missing temporary folder.";
+                    break;
+                case UPLOAD_ERR_CANT_WRITE:
+                    $errorMessage = "Server error: Failed to write file to disk.";
+                    break;
+                default:
+                    $errorMessage = "Upload error code: " . $uploadError;
+            }
+        } else {
+            // File uploaded successfully, now process it
+            $fileName = $_FILES['file']['name'];
+            $fileSize = $_FILES['file']['size'];
+            $fileType = $_FILES['file']['type'];
+
+            logError("File details - Name: $fileName, Size: $fileSize, Type: $fileType");
+
+            // Basic validation
+            if ($fileSize > 1024 * 1024) { // 1MB
+                $errorMessage = "File is too large. Maximum size is 1MB.";
+                logError("File too large: $fileSize bytes");
+            } else if ($fileSize == 0) {
+                $errorMessage = "File appears to be empty.";
+                logError("Empty file uploaded");
+            } else {
+                // Generate safe filename
+                $fileExtension = pathinfo($fileName, PATHINFO_EXTENSION);
+                $safeName = uniqid() . '_' . time() . '.' . $fileExtension;
+                $uploadPath = $uploadDir . $safeName;
+
+                logError("Attempting to move file to: $uploadPath");
+
+                // Try to move uploaded file
+                if (move_uploaded_file($_FILES['file']['tmp_name'], $uploadPath)) {
+                    logError("File moved successfully");
+
+                    try {
+                        // Initialize Cloud OCR
+                        $cloudOCR = new SimpleCloudOCR();
+
+                        // Extract text
+                        $extractedText = $cloudOCR->extractText($uploadPath, $selectedLanguage);
+
+                        // Generate result files
+                        $originalName = pathinfo($fileName, PATHINFO_FILENAME);
+                        $resultFileName = $originalName . '_' . date('Y-m-d_H-i-s') . '.txt';
+                        $resultPath = $resultsDir . $resultFileName;
+
+                        // Create detailed result file
+                        $resultContent = "OCR EXTRACTION RESULT\n";
+                        $resultContent .= "=====================\n\n";
+                        $resultContent .= "Original Image: " . $fileName . "\n";
+                        $resultContent .= "File Size: " . number_format($fileSize / 1024, 2) . " KB\n";
+                        $resultContent .= "Language: " . $selectedLanguage . "\n";
+                        $resultContent .= "Processing Date: " . date('Y-m-d H:i:s') . "\n";
+                        $resultContent .= "Server: " . $_SERVER['HTTP_HOST'] . "\n\n";
+                        $resultContent .= "EXTRACTED TEXT:\n";
+                        $resultContent .= "---------------\n";
+
+                        if (empty(trim($extractedText))) {
+                            $resultContent .= "[NO TEXT EXTRACTED]\n\n";
+                            $resultContent .= "Possible reasons:\n";
+                            $resultContent .= "- Image quality too low\n";
+                            $resultContent .= "- Text too small or blurry\n";
+                            $resultContent .= "- Wrong language selected\n";
+                            $resultContent .= "- Image contains no readable text\n";
+
+                            $errorMessage = "No text could be extracted from the image. Check the saved result file: $resultFileName";
+                        } else {
+                            $resultContent .= $extractedText . "\n\n";
+                            $resultContent .= "Character Count: " . strlen($extractedText) . "\n";
+                            $resultContent .= "Word Count: " . str_word_count($extractedText) . "\n";
+
+                            $successMessage = "Text extracted successfully! Result saved as: $resultFileName";
+                        }
+
+                        // Save result to file
+                        file_put_contents($resultPath, $resultContent);
+
+                        // Also save a copy of the original image
+                        $imageBackupPath = $resultsDir . $originalName . '_' . date('Y-m-d_H-i-s') . '.' . $fileExtension;
+                        copy($uploadPath, $imageBackupPath);
+
+                        logError("Results saved successfully");
+                    } catch (Exception $e) {
+                        $errorMsg = $e->getMessage();
+                        logError("OCR Exception: $errorMsg");
+
+                        // Save error log
+                        $errorLogPath = $resultsDir . 'error_' . date('Y-m-d_H-i-s') . '.txt';
+                        $errorContent = "OCR ERROR LOG\n";
+                        $errorContent .= "=============\n\n";
+                        $errorContent .= "Error Date: " . date('Y-m-d H:i:s') . "\n";
+                        $errorContent .= "Original Image: " . $fileName . "\n";
+                        $errorContent .= "Error Message: " . $errorMsg . "\n";
+
+                        file_put_contents($errorLogPath, $errorContent);
+
+                        $errorMessage = "OCR Error: " . $errorMsg . "<br><small>Error log saved as: <strong>" . basename($errorLogPath) . "</strong></small>";
+                    }
+
+                    // Clean up uploaded file
+                    if (file_exists($uploadPath)) {
+                        unlink($uploadPath);
+                    }
+                } else {
+                    $errorMessage = "Failed to upload file. Please check directory permissions.";
+                    logError("Failed to move uploaded file");
+                }
+            }
+        }
+    } else {
+        $errorMessage = "Please select an image file to upload.";
+        logError("No file in FILES array");
+    }
+}
+
+// Get supported languages
+try {
+    $cloudOCR = new SimpleCloudOCR();
+    $supportedLanguages = $cloudOCR->getSupportedLanguages();
+    logError("Languages loaded successfully");
+} catch (Exception $e) {
+    logError("Error loading languages: " . $e->getMessage());
+    $supportedLanguages = array('eng' => 'English'); // Fallback
+}
+
+logError("=== SCRIPT COMPLETED SUCCESSFULLY ===");
+?>
+
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Simple Debug OCR</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 20px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+
+        .header {
+            background: #28a745;
+            color: white;
+            padding: 20px;
+            border-radius: 5px;
+            text-align: center;
+            margin-bottom: 20px;
+        }
+
+        .alert {
+            padding: 15px;
+            margin: 15px 0;
+            border-radius: 5px;
+        }
+
+        .alert-success {
+            background: #d4edda;
+            color: #155724;
+            border: 1px solid #c3e6cb;
+        }
+
+        .alert-danger {
+            background: #f8d7da;
+            color: #721c24;
+            border: 1px solid #f5c6cb;
+        }
+
+        .alert-info {
+            background: #d1ecf1;
+            color: #0c5460;
+            border: 1px solid #bee5eb;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+
+        input,
+        select,
+        button {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            font-size: 16px;
+        }
+
+        button {
+            background: #007cba;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        button:hover {
+            background: #005a87;
+        }
+
+        .result {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 5px;
+            margin-top: 20px;
+            border-left: 4px solid #007cba;
+        }
+
+        .extracted-text {
+            background: white;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            font-family: monospace;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .debug-info {
+            background: #f1f1f1;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 0.9rem;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔧 Simple Debug OCR</h1>
+            <p>Simplified version to identify and fix errors</p>
+        </div>
+
+        <div class="debug-info">
+            <strong>Debug Info:</strong> PHP <?php echo phpversion(); ?> |
+            cURL: <?php echo function_exists('curl_init') ? 'Available' : 'Not Available'; ?> |
+            Upload Dir: <?php echo is_writable($uploadDir) ? 'Writable' : 'Not Writable'; ?>
+        </div>
+
+        <?php if ($errorMessage): ?>
+            <div class="alert alert-danger">
+                <strong>❌ Error:</strong> <?php echo $errorMessage; ?>
+            </div>
+        <?php endif; ?>
+
+        <?php if ($successMessage): ?>
+            <div class="alert alert-success">
+                <strong>✅ Success:</strong> <?php echo $successMessage; ?>
+            </div>
+        <?php endif; ?>
+
+        <div class="alert alert-info">
+            <strong>ℹ️ This is a debug version:</strong> If this page loads without errors, the HTTP 500 issue has been resolved. Check the debug_logs/ folder for detailed processing logs.
+        </div>
+
+        <form method="POST" enctype="multipart/form-data">
+            <div class="form-group">
+                <label for="file">📁 Select Image File</label>
+                <input type="file" id="file" name="file" accept="image/*" required>
+            </div>
+
+            <div class="form-group">
+                <label for="language">🌍 Select Language</label>
+                <select id="language" name="language">
+                    <?php foreach ($supportedLanguages as $code => $name): ?>
+                        <option value="<?php echo htmlspecialchars($code); ?>" <?php echo $selectedLanguage === $code ? 'selected' : ''; ?>>
+                            <?php echo htmlspecialchars($name); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+            </div>
+
+            <button type="submit" name="submit" value="extract_text">
+                🚀 Extract Text from Image
+            </button>
+        </form>
+
+        <?php if (!empty($extractedText)): ?>
+            <div class="result">
+                <h3>📝 Extracted Text</h3>
+                <div class="extracted-text"><?php echo htmlspecialchars($extractedText); ?></div>
+            </div>
+        <?php endif; ?>
+
+        <div style="margin-top: 30px; text-align: center;">
+            <a href="view_results.php" style="display: inline-block; padding: 10px 20px; background: #28a745; color: white; text-decoration: none; border-radius: 5px;">📁 View Results</a>
+            <a href="diagnostic.php" style="display: inline-block; padding: 10px 20px; background: #6c757d; color: white; text-decoration: none; border-radius: 5px; margin-left: 10px;">🔍 Run Diagnostics</a>
+        </div>
+    </div>
+
+    <script>
+        document.querySelector('form').addEventListener('submit', function(e) {
+            const fileInput = document.getElementById('file');
+            if (!fileInput.files || fileInput.files.length === 0) {
+                alert('Please select an image file first!');
+                e.preventDefault();
+                return false;
+            }
+
+            const submitBtn = document.querySelector('button[type="submit"]');
+            submitBtn.innerHTML = '⏳ Processing...';
+            submitBtn.disabled = true;
+        });
+    </script>
+</body>
+
+</html>
