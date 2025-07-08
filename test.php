@@ -6,7 +6,7 @@
  */
 
 // Include your main configuration
-require_once 'index.php'; // Replace with your actual file name
+require_once 'your_main_file.php'; // Replace with your actual file name
 
 class OCRNLPTester
 {
@@ -81,7 +81,7 @@ class OCRNLPTester
         echo "<h3>🔍 $test_name</h3>\n";
 
         try {
-            $result = analyzeWithClaude($text, $test_name . '.txt');
+            $result = analyzeWithGemini($text, $test_name . '.txt');
 
             echo "<p><strong>Input Text:</strong> " . substr($text, 0, 100) . "...</p>\n";
             echo "<p><strong>Expected Subject:</strong> $expected_subject</p>\n";
@@ -257,7 +257,7 @@ class OCRNLPTester
         echo "<h3>🧪 {$case['test_name']}</h3>\n";
 
         try {
-            $result = analyzeWithClaude($case['content'], $case['test_name'] . '.txt');
+            $result = analyzeWithGemini($case['content'], $case['test_name'] . '.txt');
 
             echo "<p><strong>Input Length:</strong> " . strlen($case['content']) . " characters</p>\n";
             echo "<p><strong>Content Preview:</strong> " . htmlspecialchars(substr($case['content'], 0, 100)) . "...</p>\n";
@@ -299,13 +299,13 @@ class OCRNLPTester
         echo "<div style='border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 8px;'>\n";
         echo "<h3>🔑 API Keys Configuration</h3>\n";
 
-        // Check Claude API Key
-        $claude_key = CLAUDE_API_KEY;
-        $claude_configured = ($claude_key !== 'your-claude-api-key-here' && !empty($claude_key));
+        // Check Gemini API Key
+        $gemini_key = GEMINI_API_KEY;
+        $gemini_configured = ($gemini_key !== 'your-gemini-api-key-here' && !empty($gemini_key));
 
-        echo "<p><strong>Claude API Key:</strong> ";
-        if ($claude_configured) {
-            echo "<span style='color: green;'>✅ Configured (Length: " . strlen($claude_key) . ")</span></p>\n";
+        echo "<p><strong>Gemini API Key:</strong> ";
+        if ($gemini_configured) {
+            echo "<span style='color: green;'>✅ Configured (Length: " . strlen($gemini_key) . ")</span></p>\n";
         } else {
             echo "<span style='color: red;'>❌ Not configured or using placeholder</span></p>\n";
         }
@@ -370,10 +370,10 @@ class OCRNLPTester
         // Recommendations
         echo "<h3>💡 Recommendations</h3>\n";
         echo "<ul>\n";
-        echo "<li>Ensure both Claude and OCR.space API keys are properly configured</li>\n";
-        echo "<li>Use the latest Claude model: <code>claude-3-5-sonnet-20241022</code></li>\n";
+        echo "<li>Ensure both Gemini and OCR.space API keys are properly configured</li>\n";
+        echo "<li>Use Gemini 1.5 Flash model for fast and cost-effective processing</li>\n";
         echo "<li>Test with actual image files to verify end-to-end OCR functionality</li>\n";
-        echo "<li>Monitor API usage limits and costs</li>\n";
+        echo "<li>Monitor API usage limits and costs (Gemini has generous free tier)</li>\n";
         echo "<li>Consider implementing caching for repeated text analysis</li>\n";
         echo "<li>Add more robust error handling for production use</li>\n";
         echo "</ul>\n";
