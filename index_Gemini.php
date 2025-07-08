@@ -3,7 +3,7 @@ session_start();
 
 // Configuration
 define('UPLOAD_DIR', 'uploads/');
-define('GEMINI_API_KEY', 'your-gemini-api-key-here'); // Add your Gemini API key
+define('GEMINI_API_KEY', 'AIzaSyCu68wHXmbZUFaO-ZNdcA66dmSfzQrznD8'); // Add your Gemini API key
 define('OCR_SPACE_API_KEY', 'K83046822188957'); // Add your OCR.space API key
 
 // Create upload directory if it doesn't exist
