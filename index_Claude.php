@@ -1,10 +1,24 @@
 <?php
 session_start();
 
+// Include authentication functions
+require_once 'auth.php'; // This should contain your login functions
+
+// AUTHENTICATION CHECK - Redirect if not logged in
+if (!isLoggedIn()) {
+    header('Location: login.php');
+    exit();
+}
+
+// Handle logout
+if (isset($_GET['action']) && $_GET['action'] === 'logout') {
+    logout(); // This will redirect to login.php
+}
+
 // Configuration
 define('UPLOAD_DIR', 'uploads/');
 define('CLAUDE_API_KEY', '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'); // Add your Claude API key
-define('OCR_SPACE_API_KEY', 'K83046822188957'); // Add your OCR.space API key
+define('OCR_SPACE_API_KEY', 'AIzaSyCu68wHXmbZUFaO-ZNdcA66dmSfzQrznD8'); // Add your OCR.space API key
 
 // Create upload directory if it doesn't exist
 if (!file_exists(UPLOAD_DIR)) {
@@ -12,8 +26,10 @@ if (!file_exists(UPLOAD_DIR)) {
 }
 
 // Initialize uploaded files in session if not exists
-if (!isset($_SESSION['uploaded_files'])) {
-    $_SESSION['uploaded_files'] = [];
+// Make files user-specific
+$user_files_key = 'uploaded_files_' . $_SESSION['user_id'];
+if (!isset($_SESSION[$user_files_key])) {
+    $_SESSION[$user_files_key] = [];
 }
 
 // OCR Function using OCR.space API with detailed debugging
@@ -22,7 +38,7 @@ function performOCR($file_path)
     $api_key = OCR_SPACE_API_KEY;
 
     // Check if API key is set
-    if ($api_key === 'your-ocr-space-api-key-here' || empty($api_key)) {
+    if ($api_key === 'AIzaSyCu68wHXmbZUFaO-ZNdcA66dmSfzQrznD8' || empty($api_key)) {
         error_log("OCR.space API key not configured");
         return ['error' => 'OCR.space API key not configured', 'text' => false];
     }
@@ -38,12 +54,12 @@ function performOCR($file_path)
     // Prepare the file for upload
     $post_data = [
         'apikey' => $api_key,
-        'language' => 'eng', // You can change to 'tha' for Thai or use 'eng+tha' for both
+        'language' => 'eng',
         'isOverlayRequired' => 'false',
         'file' => new CURLFile($file_path),
         'detectOrientation' => 'true',
-        'isTable' => 'true', // Better for structured content
-        'OCREngine' => '2' // Use OCR Engine 2 for better accuracy
+        'isTable' => 'true',
+        'OCREngine' => '2'
     ];
 
     $ch = curl_init();
@@ -51,17 +67,16 @@ function performOCR($file_path)
     curl_setopt($ch, CURLOPT_POST, true);
     curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 60); // OCR can take time for large files
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // For development only
+    curl_setopt($ch, CURLOPT_TIMEOUT, 60);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
 
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_error = curl_error($ch);
     curl_close($ch);
 
-    // Log debug information
     error_log("OCR API Response Code: " . $http_code);
-    error_log("OCR API Response: " . substr($response, 0, 500)); // First 500 chars
+    error_log("OCR API Response: " . substr($response, 0, 500));
 
     if ($curl_error) {
         error_log("CURL Error: " . $curl_error);
@@ -94,8 +109,6 @@ function performOCR($file_path)
 // Extract text from PDF (simple implementation)
 function extractTextFromPDF($file_path)
 {
-    // For production, use a proper PDF library like PDFParser or similar
-    // This is a simplified version that works with some PDFs
     $content = shell_exec("pdftotext '$file_path' -");
     return $content ? trim($content) : false;
 }
@@ -105,8 +118,7 @@ function analyzeWithClaude($text_content, $filename)
 {
     $api_key = CLAUDE_API_KEY;
 
-    // Check if API key is set
-    if ($api_key === 'your-claude-api-key-here' || empty($api_key)) {
+    if ($api_key === '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' || empty($api_key)) {
         error_log("Claude API key not configured");
         return [
             'subject' => 'Others',
@@ -115,7 +127,6 @@ function analyzeWithClaude($text_content, $filename)
         ];
     }
 
-    // Check if we have content to analyze
     if (empty(trim($text_content))) {
         return [
             'subject' => 'Others',
@@ -161,16 +172,15 @@ Respond in this exact JSON format:
     curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($request_data));
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // For development only
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
 
     $response = curl_exec($ch);
     $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     $curl_error = curl_error($ch);
     curl_close($ch);
 
-    // Log debug information
     error_log("Claude API Response Code: " . $http_code);
-    error_log("Claude API Response: " . substr($response, 0, 500)); // First 500 chars
+    error_log("Claude API Response: " . substr($response, 0, 500));
 
     if ($curl_error) {
         error_log("CURL Error for Claude: " . $curl_error);
@@ -186,7 +196,6 @@ Respond in this exact JSON format:
         if (isset($result['content'][0]['text'])) {
             $claude_response = $result['content'][0]['text'];
 
-            // Extract JSON from Claude's response
             preg_match('/\{[^}]+\}/', $claude_response, $matches);
             if ($matches) {
                 $analysis = json_decode($matches[0], true);
@@ -199,7 +208,6 @@ Respond in this exact JSON format:
                 }
             }
 
-            // If JSON parsing failed, create fallback analysis
             return [
                 'subject' => 'Others',
                 'summary' => 'Document analyzed but format parsing failed',
@@ -217,7 +225,6 @@ Respond in this exact JSON format:
         ];
     }
 
-    // Fallback analysis if everything fails
     return [
         'subject' => 'Others',
         'summary' => 'Document uploaded successfully but AI analysis failed',
@@ -229,7 +236,10 @@ Respond in this exact JSON format:
 function processUploadedFile($uploaded_file)
 {
     $file_extension = strtolower(pathinfo($uploaded_file['name'], PATHINFO_EXTENSION));
-    $upload_path = UPLOAD_DIR . time() . '_' . $uploaded_file['name'];
+
+    // Make filename user-specific to avoid conflicts
+    $user_id = $_SESSION['user_id'];
+    $upload_path = UPLOAD_DIR . $user_id . '_' . time() . '_' . $uploaded_file['name'];
 
     $debug_info = [];
     $debug_info[] = "File extension: " . $file_extension;
@@ -240,17 +250,14 @@ function processUploadedFile($uploaded_file)
         $extracted_text = '';
         $ocr_debug = '';
 
-        // Extract text based on file type
         if ($file_extension === 'pdf') {
             $debug_info[] = "Processing PDF file";
-            // First try to extract text directly from PDF
             $extracted_text = extractTextFromPDF($upload_path);
 
             if ($extracted_text && strlen(trim($extracted_text)) > 10) {
                 $debug_info[] = "PDF text extraction successful";
             } else {
                 $debug_info[] = "PDF text extraction failed, trying OCR";
-                // If PDF text extraction fails, try OCR
                 $ocr_result = performOCR($upload_path);
                 $extracted_text = $ocr_result['text'];
                 $ocr_debug = $ocr_result['error'] ?? $ocr_result['debug'] ?? '';
@@ -273,10 +280,9 @@ function processUploadedFile($uploaded_file)
         $debug_info[] = "Extracted text length: " . strlen($extracted_text);
         $debug_info[] = "OCR debug: " . $ocr_debug;
 
-        if ($extracted_text && strlen(trim($extracted_text)) > 10) { // Ensure we have meaningful content
+        if ($extracted_text && strlen(trim($extracted_text)) > 10) {
             $debug_info[] = "Text extraction successful, analyzing with Claude";
 
-            // Analyze with Claude API
             $analysis = analyzeWithClaude($extracted_text, $uploaded_file['name']);
             $debug_info[] = "Claude debug: " . ($analysis['debug'] ?? 'no debug info');
 
@@ -284,7 +290,7 @@ function processUploadedFile($uploaded_file)
                 'subject' => $analysis['subject'],
                 'summary' => $analysis['summary'],
                 'status' => 'completed',
-                'extracted_text' => substr($extracted_text, 0, 1000), // Store first 1000 chars for reference
+                'extracted_text' => substr($extracted_text, 0, 1000),
                 'debug_info' => implode('; ', $debug_info)
             ];
         } else {
@@ -313,37 +319,36 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['uploaded_file'])) {
     $uploaded_file = $_FILES['uploaded_file'];
 
     if ($uploaded_file['error'] === UPLOAD_ERR_OK) {
-        // Create initial file entry
         $file_info = [
-            'id' => count($_SESSION['uploaded_files']) + 1,
+            'id' => count($_SESSION[$user_files_key]) + 1,
             'name' => $uploaded_file['name'],
             'subject' => 'Processing...',
             'date' => date('Y-m-d'),
             'summary' => 'AI is analyzing this document...',
             'status' => 'processing',
-            'debug_info' => '' // Add debug information
+            'debug_info' => ''
         ];
 
-        // Add to beginning of array
-        array_unshift($_SESSION['uploaded_files'], $file_info);
+        array_unshift($_SESSION[$user_files_key], $file_info);
 
-        // Process the file
         $processing_result = processUploadedFile($uploaded_file);
 
         if ($processing_result) {
-            // Update the file info with AI analysis results
-            $_SESSION['uploaded_files'][0]['subject'] = $processing_result['subject'];
-            $_SESSION['uploaded_files'][0]['summary'] = $processing_result['summary'];
-            $_SESSION['uploaded_files'][0]['status'] = $processing_result['status'];
-            $_SESSION['uploaded_files'][0]['debug_info'] = $processing_result['debug_info'] ?? '';
+            $_SESSION[$user_files_key][0]['subject'] = $processing_result['subject'];
+            $_SESSION[$user_files_key][0]['summary'] = $processing_result['summary'];
+            $_SESSION[$user_files_key][0]['status'] = $processing_result['status'];
+            $_SESSION[$user_files_key][0]['debug_info'] = $processing_result['debug_info'] ?? '';
         } else {
-            $_SESSION['uploaded_files'][0]['subject'] = 'Others';
-            $_SESSION['uploaded_files'][0]['summary'] = 'Error processing file - could not process uploaded file';
-            $_SESSION['uploaded_files'][0]['status'] = 'error';
-            $_SESSION['uploaded_files'][0]['debug_info'] = 'processUploadedFile returned false';
+            $_SESSION[$user_files_key][0]['subject'] = 'Others';
+            $_SESSION[$user_files_key][0]['summary'] = 'Error processing file - could not process uploaded file';
+            $_SESSION[$user_files_key][0]['status'] = 'error';
+            $_SESSION[$user_files_key][0]['debug_info'] = 'processUploadedFile returned false';
         }
+
+        // REDIRECT after successful upload to prevent re-submission
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($_GET));
+        exit();
     } else {
-        // Handle upload errors
         $error_messages = [
             UPLOAD_ERR_INI_SIZE => 'File too large (exceeds upload_max_filesize)',
             UPLOAD_ERR_FORM_SIZE => 'File too large (exceeds MAX_FILE_SIZE)',
@@ -357,7 +362,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['uploaded_file'])) {
         $error_message = $error_messages[$uploaded_file['error']] ?? 'Unknown upload error';
 
         $file_info = [
-            'id' => count($_SESSION['uploaded_files']) + 1,
+            'id' => count($_SESSION[$user_files_key]) + 1,
             'name' => $uploaded_file['name'] ?? 'Unknown file',
             'subject' => 'Others',
             'date' => date('Y-m-d'),
@@ -366,7 +371,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['uploaded_file'])) {
             'debug_info' => 'Upload error code: ' . $uploaded_file['error']
         ];
 
-        array_unshift($_SESSION['uploaded_files'], $file_info);
+        array_unshift($_SESSION[$user_files_key], $file_info);
+
+        // REDIRECT after error to show error message
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($_GET));
+        exit();
     }
 }
 
@@ -383,8 +392,8 @@ $subjects = [
     ['name' => 'Others', 'color' => 'bg-gray-500', 'count' => 0]
 ];
 
-// Count files by subject
-foreach ($_SESSION['uploaded_files'] as $file) {
+// Count files by subject (user-specific)
+foreach ($_SESSION[$user_files_key] as $file) {
     foreach ($subjects as &$subject) {
         if ($subject['name'] === $file['subject']) {
             $subject['count']++;
@@ -393,12 +402,12 @@ foreach ($_SESSION['uploaded_files'] as $file) {
 }
 
 // Get recent files (first 5 for desktop)
-$recent_files = array_slice($_SESSION['uploaded_files'], 0, 5);
+$recent_files = array_slice($_SESSION[$user_files_key], 0, 5);
 
 // Filter files by subject if selected
-$filtered_files = $_SESSION['uploaded_files'];
+$filtered_files = $_SESSION[$user_files_key];
 if ($selected_subject) {
-    $filtered_files = array_filter($_SESSION['uploaded_files'], function ($file) use ($selected_subject) {
+    $filtered_files = array_filter($_SESSION[$user_files_key], function ($file) use ($selected_subject) {
         return $file['subject'] === $selected_subject;
     });
 }
@@ -446,7 +455,6 @@ function getSubjectIcon($subject)
             background-color: #6b7280;
         }
 
-        /* Custom scrollbar for webkit browsers */
         .custom-scrollbar::-webkit-scrollbar {
             width: 6px;
         }
@@ -464,18 +472,15 @@ function getSubjectIcon($subject)
             background: #94a3b8;
         }
 
-        /* Sidebar transition */
         .sidebar-transition {
             transition: transform 0.3s ease-in-out;
         }
 
-        /* Upload area hover effects */
         .upload-area:hover {
             transform: translateY(-2px);
             box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
         }
 
-        /* Card hover effects */
         .card-hover:hover {
             transform: translateY(-1px);
             box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
@@ -492,9 +497,12 @@ function getSubjectIcon($subject)
                 <div class="flex items-center justify-between">
                     <h1 class="text-xl font-bold text-gray-800">StudyOrganizer</h1>
                     <div class="w-8 h-8 bg-blue-500 rounded-full flex items-center justify-center">
-                        <span class="text-white text-sm font-semibold">K</span>
+                        <span class="text-white text-sm font-semibold">
+                            <?php echo strtoupper(substr($_SESSION['user_email'], 0, 1)); ?>
+                        </span>
                     </div>
                 </div>
+                <p class="text-sm text-gray-600 mt-1">Welcome, <?php echo htmlspecialchars($_SESSION['user_email']); ?></p>
             </div>
 
             <!-- Navigation -->
@@ -528,12 +536,16 @@ function getSubjectIcon($subject)
                 </div>
             </nav>
 
-            <!-- Footer -->
+            <!-- Footer with Logout -->
             <div class="px-4 py-4 border-t border-gray-200">
-                <button class="w-full flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors">
+                <button class="w-full flex items-center px-4 py-2 text-sm text-gray-600 hover:bg-gray-100 rounded-lg transition-colors mb-2">
                     <span class="text-lg mr-3">🔍</span>
                     <span>Search Files</span>
                 </button>
+                <a href="?action=logout" class="w-full flex items-center px-4 py-2 text-sm text-red-600 hover:bg-red-50 rounded-lg transition-colors">
+                    <span class="text-lg mr-3">🚪</span>
+                    <span>Logout</span>
+                </a>
             </div>
         </div>
 
@@ -681,7 +693,7 @@ function getSubjectIcon($subject)
                                         <?php endforeach; ?>
                                     <?php endif; ?>
                                 </div>
-                                <?php if (count($_SESSION['uploaded_files']) > 5): ?>
+                                <?php if (count($_SESSION[$user_files_key]) > 5): ?>
                                     <div class="mt-6 text-center">
                                         <a href="?tab=subjects" class="text-blue-600 hover:text-blue-700 font-medium">View All Files →</a>
                                     </div>
@@ -699,7 +711,7 @@ function getSubjectIcon($subject)
                                             </div>
                                             <span class="font-medium text-gray-800">Total Files</span>
                                         </div>
-                                        <span class="text-2xl font-bold text-blue-600"><?php echo count($_SESSION['uploaded_files']); ?></span>
+                                        <span class="text-2xl font-bold text-blue-600"><?php echo count($_SESSION[$user_files_key]); ?></span>
                                     </div>
                                     <div class="flex items-center justify-between p-3 bg-green-50 rounded-lg">
                                         <div class="flex items-center">
@@ -711,7 +723,7 @@ function getSubjectIcon($subject)
                                         <span class="text-2xl font-bold text-green-600">
                                             <?php
                                             $processed = 0;
-                                            foreach ($_SESSION['uploaded_files'] as $file) {
+                                            foreach ($_SESSION[$user_files_key] as $file) {
                                                 if (isset($file['status']) && $file['status'] === 'completed') {
                                                     $processed++;
                                                 }
@@ -942,7 +954,7 @@ function getSubjectIcon($subject)
 
     <script>
         // File details modal functionality
-        const fileData = <?php echo json_encode($_SESSION['uploaded_files']); ?>;
+        const fileData = <?php echo json_encode($_SESSION[$user_files_key]); ?>;
 
         function openFileDetails(fileId) {
             const file = fileData.find(f => f.id == fileId);
@@ -1011,11 +1023,11 @@ function getSubjectIcon($subject)
         // Auto-refresh the page when processing files to show updated status
         <?php
         $hasProcessingFiles = false;
-        if (isset($_SESSION['uploaded_files']) && !empty($_SESSION['uploaded_files'])) {
-            foreach ($_SESSION['uploaded_files'] as $file) {
+        if (isset($_SESSION[$user_files_key]) && !empty($_SESSION[$user_files_key])) {
+            foreach ($_SESSION[$user_files_key] as $file) {
                 if (isset($file['status']) && $file['status'] === 'processing') {
                     $hasProcessingFiles = true;
-                    break; // This break is now in PHP context
+                    break;
                 }
             }
         }
