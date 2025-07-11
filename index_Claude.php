@@ -18,7 +18,7 @@ if (isset($_GET['action']) && $_GET['action'] === 'logout') {
 // Configuration
 define('UPLOAD_DIR', 'uploads/');
 define('CLAUDE_API_KEY', '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'); // Add your Claude API key
-define('OCR_SPACE_API_KEY', 'AIzaSyCu68wHXmbZUFaO-ZNdcA66dmSfzQrznD8'); // Add your OCR.space API key
+define('OCR_SPACE_API_KEY', 'K83046822188957'); // Add your OCR.space API key
 
 // Create upload directory if it doesn't exist
 if (!file_exists(UPLOAD_DIR)) {
@@ -118,7 +118,7 @@ function analyzeWithClaude($text_content, $filename)
 {
     $api_key = CLAUDE_API_KEY;
 
-    if ($api_key === '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' || empty($api_key)) {
+    if ($api_key === '' || empty($api_key)) {
         error_log("Claude API key not configured");
         return [
             'subject' => 'Others',
