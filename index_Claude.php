@@ -946,7 +946,7 @@ function getSubjectIcon($subject)
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>StudyOrganizer</title>
+    <title>OZNOTE</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
         /* Custom color scheme based on provided palette */
@@ -1323,10 +1323,10 @@ function getSubjectIcon($subject)
             <!-- Header -->
             <div class="px-4 sm:px-6 py-4 sm:py-6 border-b border-theme-medium">
                 <div class="flex items-center justify-between">
-                    <h1 class="text-lg sm:text-xl font-bold text-theme-bright gradient-text">StudyOrganizer</h1>
+                    <h1 class="text-lg sm:text-xl font-bold text-theme-bright gradient-text">OZNOTE</h1>
                     <div class="flex items-center space-x-4 ml-6">
                         <div class="w-6 h-6 sm:w-8 sm:h-8 bg-theme-green rounded-full flex items-center justify-center">
-                            <span class="text-white text-xs sm:text-sm font-semibold">
+                            <span class="text-black text-xs sm:text-sm font-semibold">
                                 <?php echo strtoupper(substr($_SESSION['user_email'], 0, 1)); ?>
                             </span>
                         </div>
