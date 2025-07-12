@@ -45,7 +45,7 @@ if (isLoggedIn()) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login & Signup - StudyOrganizer</title>
+    <title>Login & Signup - OZNOTE</title>
     <style>
         * {
             margin: 0;
@@ -55,20 +55,39 @@ if (isLoggedIn()) {
 
         body {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: linear-gradient(135deg, #8FBB99 0%, #B0FE76 50%, #81E979 100%);
             min-height: 100vh;
             display: flex;
             justify-content: center;
             align-items: center;
+            position: relative;
+        }
+
+        /* Background pattern overlay */
+        body::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-image:
+                radial-gradient(circle at 25% 25%, rgba(86, 54, 53, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 75% 75%, rgba(89, 84, 74, 0.1) 0%, transparent 50%);
+            pointer-events: none;
         }
 
         .container {
-            background: white;
-            padding: 2rem;
-            border-radius: 10px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
+            background: rgba(255, 255, 255, 0.95);
+            backdrop-filter: blur(10px);
+            padding: 2.5rem;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(86, 54, 53, 0.1);
             width: 100%;
-            max-width: 400px;
+            max-width: 420px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            position: relative;
+            z-index: 1;
         }
 
         .header {
@@ -77,37 +96,47 @@ if (isLoggedIn()) {
         }
 
         .header h1 {
-            color: #667eea;
-            font-size: 2rem;
+            color: #563635;
+            font-size: 2.2rem;
             margin-bottom: 0.5rem;
+            font-weight: 700;
         }
 
         .header p {
-            color: #666;
-            font-size: 0.9rem;
+            color: #59544A;
+            font-size: 0.95rem;
+            opacity: 0.8;
         }
 
         .form-toggle {
             display: flex;
             margin-bottom: 2rem;
-            border-radius: 5px;
+            border-radius: 12px;
             overflow: hidden;
-            border: 1px solid #e0e0e0;
+            border: 1px solid #8FBB99;
+            background: rgba(176, 254, 118, 0.1);
         }
 
         .toggle-btn {
             flex: 1;
-            padding: 10px;
-            background: #f5f5f5;
+            padding: 12px;
+            background: transparent;
             border: none;
             cursor: pointer;
             font-size: 14px;
+            font-weight: 500;
             transition: all 0.3s ease;
+            color: #563635;
         }
 
         .toggle-btn.active {
-            background: #667eea;
-            color: white;
+            background: #B0FE76;
+            color: #563635;
+            font-weight: 600;
+        }
+
+        .toggle-btn:hover:not(.active) {
+            background: rgba(176, 254, 118, 0.2);
         }
 
         .form-container {
@@ -128,23 +157,32 @@ if (isLoggedIn()) {
 
         .form-group label {
             display: block;
-            margin-bottom: 5px;
+            margin-bottom: 6px;
             font-weight: 500;
-            color: #333;
+            color: #563635;
+            font-size: 14px;
         }
 
         .form-group input {
             width: 100%;
-            padding: 12px;
-            border: 1px solid #ddd;
-            border-radius: 5px;
+            padding: 14px 16px;
+            border: 2px solid #8FBB99;
+            border-radius: 10px;
             font-size: 14px;
-            transition: border-color 0.3s ease;
+            transition: all 0.3s ease;
+            background: rgba(255, 255, 255, 0.8);
+            color: #563635;
         }
 
         .form-group input:focus {
             outline: none;
-            border-color: #667eea;
+            border-color: #B0FE76;
+            background: white;
+            box-shadow: 0 0 0 3px rgba(176, 254, 118, 0.1);
+        }
+
+        .form-group input::placeholder {
+            color: #8FBB99;
         }
 
         .form-row {
@@ -158,56 +196,121 @@ if (isLoggedIn()) {
 
         .submit-btn {
             width: 100%;
-            padding: 12px;
-            background: #667eea;
-            color: white;
+            padding: 14px;
+            background: linear-gradient(135deg, #B0FE76 0%, #81E979 100%);
+            color: #563635;
             border: none;
-            border-radius: 5px;
+            border-radius: 10px;
             font-size: 16px;
+            font-weight: 600;
             cursor: pointer;
-            transition: background 0.3s ease;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(176, 254, 118, 0.3);
         }
 
         .submit-btn:hover {
-            background: #5a67d8;
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(176, 254, 118, 0.4);
+            background: linear-gradient(135deg, #81E979 0%, #B0FE76 100%);
+        }
+
+        .submit-btn:active {
+            transform: translateY(0);
         }
 
         .message {
             margin-top: 1rem;
-            padding: 10px;
-            border-radius: 5px;
+            padding: 12px 16px;
+            border-radius: 10px;
             text-align: center;
             font-size: 14px;
+            font-weight: 500;
         }
 
         .success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
+            background: rgba(129, 233, 121, 0.2);
+            color: #563635;
+            border: 1px solid #81E979;
         }
 
         .error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
+            background: rgba(220, 53, 69, 0.1);
+            color: #c82333;
+            border: 1px solid rgba(220, 53, 69, 0.3);
         }
 
         .footer {
             text-align: center;
             margin-top: 2rem;
-            padding-top: 1rem;
-            border-top: 1px solid #eee;
-            color: #666;
-            font-size: 0.8rem;
+            padding-top: 1.5rem;
+            border-top: 1px solid rgba(143, 187, 153, 0.3);
+            color: #59544A;
+            font-size: 0.85rem;
+        }
+
+        /* Back to home link */
+        .back-home {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #563635;
+            text-decoration: none;
+            font-weight: 500;
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.9);
+            border-radius: 20px;
+            transition: all 0.3s ease;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+        }
+
+        .back-home:hover {
+            background: rgba(176, 254, 118, 0.9);
+            transform: translateY(-2px);
+        }
+
+        /* Responsive design */
+        @media (max-width: 480px) {
+            .container {
+                margin: 20px;
+                padding: 2rem;
+            }
+
+            .header h1 {
+                font-size: 1.8rem;
+            }
+
+            .form-row {
+                flex-direction: column;
+                gap: 0;
+            }
+        }
+
+        /* Debug info styling */
+        .debug-info {
+            margin-top: 1rem;
+            padding: 12px;
+            background: rgba(176, 254, 118, 0.1);
+            border-radius: 8px;
+            font-size: 12px;
+            color: #59544A;
+            border: 1px solid rgba(143, 187, 153, 0.3);
+        }
+
+        .debug-info strong {
+            color: #563635;
         }
     </style>
 </head>
 
 <body>
+    <!-- Back to home button -->
+    <a href="index.php" class="back-home">← Back to Home</a>
+
     <div class="container">
         <!-- Header -->
         <div class="header">
-            <h1>📚 StudyOrganizer</h1>
+            <h1>📚 OZNOTE</h1>
             <p>AI-powered document organization for students</p>
         </div>
 
@@ -224,12 +327,12 @@ if (isLoggedIn()) {
 
                 <div class="form-group">
                     <label for="login_email">Email:</label>
-                    <input type="email" id="login_email" name="email" required>
+                    <input type="email" id="login_email" name="email" placeholder="Enter your email" required>
                 </div>
 
                 <div class="form-group">
                     <label for="login_password">Password:</label>
-                    <input type="password" id="login_password" name="password" required>
+                    <input type="password" id="login_password" name="password" placeholder="Enter your password" required>
                 </div>
 
                 <button type="submit" class="submit-btn">Login</button>
@@ -242,28 +345,28 @@ if (isLoggedIn()) {
                 <div class="form-row">
                     <div class="form-group">
                         <label for="signup_name">Name:</label>
-                        <input type="text" id="signup_name" name="name" required>
+                        <input type="text" id="signup_name" name="name" placeholder="First name" required>
                     </div>
 
                     <div class="form-group">
                         <label for="signup_surname">Surname:</label>
-                        <input type="text" id="signup_surname" name="surname" required>
+                        <input type="text" id="signup_surname" name="surname" placeholder="Last name" required>
                     </div>
                 </div>
 
                 <div class="form-group">
                     <label for="signup_email">Email:</label>
-                    <input type="email" id="signup_email" name="email" required>
+                    <input type="email" id="signup_email" name="email" placeholder="Enter your email" required>
                 </div>
 
                 <div class="form-group">
                     <label for="signup_password">Password:</label>
-                    <input type="password" id="signup_password" name="password" required>
+                    <input type="password" id="signup_password" name="password" placeholder="Create a password" required>
                 </div>
 
                 <div class="form-group">
                     <label for="confirm_password">Confirm Password:</label>
-                    <input type="password" id="confirm_password" name="confirm_password" required>
+                    <input type="password" id="confirm_password" name="confirm_password" placeholder="Confirm your password" required>
                 </div>
 
                 <button type="submit" class="submit-btn">Sign Up</button>
@@ -278,7 +381,7 @@ if (isLoggedIn()) {
 
         <!-- Debug info (remove in production) -->
         <?php if (isset($_POST['action']) && $_POST['action'] === 'login'): ?>
-            <div style="margin-top: 1rem; padding: 10px; background: #f0f8ff; border-radius: 5px; font-size: 12px; color: #666;">
+            <div class="debug-info">
                 <strong>Debug Info:</strong><br>
                 Email: <?php echo htmlspecialchars($_POST['email'] ?? 'none'); ?><br>
                 Action: <?php echo htmlspecialchars($_POST['action']); ?><br>
@@ -323,6 +426,42 @@ if (isLoggedIn()) {
                 document.querySelector('.toggle-btn:last-child').classList.add('active');
             }
         }
+
+        // Add some interactive effects
+        document.querySelectorAll('.form-group input').forEach(input => {
+            input.addEventListener('focus', function() {
+                this.parentElement.style.transform = 'translateY(-2px)';
+            });
+
+            input.addEventListener('blur', function() {
+                this.parentElement.style.transform = 'translateY(0)';
+            });
+        });
+
+        // Add form validation feedback
+        document.querySelectorAll('form').forEach(form => {
+            form.addEventListener('submit', function(e) {
+                const submitBtn = this.querySelector('.submit-btn');
+                submitBtn.innerHTML = 'Processing...';
+                submitBtn.style.opacity = '0.7';
+            });
+        });
+
+        // Password confirmation validation
+        const signupForm = document.getElementById('signupForm');
+        const password = document.getElementById('signup_password');
+        const confirmPassword = document.getElementById('confirm_password');
+
+        function validatePassword() {
+            if (password.value !== confirmPassword.value) {
+                confirmPassword.setCustomValidity("Passwords don't match");
+            } else {
+                confirmPassword.setCustomValidity('');
+            }
+        }
+
+        password.addEventListener('change', validatePassword);
+        confirmPassword.addEventListener('keyup', validatePassword);
     </script>
 </body>
 
