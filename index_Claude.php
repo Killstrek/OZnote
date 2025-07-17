@@ -21,39 +21,35 @@ if (isset($_GET['action']) && $_GET['action'] === 'test_api') {
 
     $test_results = [];
 
-    // Test Google Vision API
-    $test_results['google_vision'] = [];
-    if (GOOGLE_VISION_API_KEY === 'YOUR_GOOGLE_VISION_API_KEY_HERE') {
-        $test_results['google_vision']['status'] = 'error';
-        $test_results['google_vision']['message'] = 'API key not configured';
-    } else {
-        // Test with a simple API call
-        $test_url = GOOGLE_VISION_API_URL . '?key=' . GOOGLE_VISION_API_KEY;
-        $test_data = ['requests' => [['image' => ['content' => ''], 'features' => [['type' => 'TEXT_DETECTION']]]]];
-
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $test_url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($test_data));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
-
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-
-        if ($http_code === 400) {
-            // 400 is expected for empty image, but means API key works
-            $test_results['google_vision']['status'] = 'success';
-            $test_results['google_vision']['message'] = 'API key is valid and accessible';
-        } elseif ($http_code === 401 || $http_code === 403) {
-            $test_results['google_vision']['status'] = 'error';
-            $test_results['google_vision']['message'] = 'Invalid API key or permission denied';
+    // Test Tesseract OCR
+    $test_results['tesseract'] = [];
+    
+    // Check if Tesseract is installed
+    $tesseract_version = shell_exec('tesseract --version 2>&1');
+    if (strpos($tesseract_version, 'tesseract') !== false) {
+        $test_results['tesseract']['status'] = 'success';
+        $test_results['tesseract']['message'] = 'Tesseract is installed and accessible';
+        $test_results['tesseract']['version'] = trim(explode("\n", $tesseract_version)[0]);
+        
+        // Check for language support
+        $languages = shell_exec('tesseract --list-langs 2>&1');
+        if (strpos($languages, 'eng') !== false) {
+            $test_results['tesseract']['languages'] = 'English support: ✅';
         } else {
-            $test_results['google_vision']['status'] = 'warning';
-            $test_results['google_vision']['message'] = "Unexpected response: HTTP $http_code";
+            $test_results['tesseract']['languages'] = 'English support: ❌';
         }
+        
+        if (strpos($languages, 'tha') !== false) {
+            $test_results['tesseract']['languages'] .= ' | Thai support: ✅';
+        } else {
+            $test_results['tesseract']['languages'] .= ' | Thai support: ❌';
+        }
+
+        // Test PDF support
+        $test_results['tesseract']['pdf_support'] = 'PDF support: ✅ (Direct processing)';
+    } else {
+        $test_results['tesseract']['status'] = 'error';
+        $test_results['tesseract']['message'] = 'Tesseract is not installed or not accessible';
     }
 
     // Test Claude API
@@ -76,9 +72,21 @@ if (isset($_GET['action']) && $_GET['action'] === 'test_api') {
         $test_results['filesystem']['message'] = 'Upload directory is writable';
     }
 
+    // Test pdftotext (optional but helpful for text-based PDFs)
+    $test_results['pdftotext'] = [];
+    $pdftotext_test = shell_exec('pdftotext -v 2>&1');
+    if ($pdftotext_test && strpos($pdftotext_test, 'pdftotext') !== false) {
+        $test_results['pdftotext']['status'] = 'success';
+        $test_results['pdftotext']['message'] = 'pdftotext available for fast PDF text extraction';
+    } else {
+        $test_results['pdftotext']['status'] = 'warning';
+        $test_results['pdftotext']['message'] = 'pdftotext not available - will use Tesseract for all PDFs';
+    }
+
     echo json_encode($test_results);
     exit();
 }
+
 if (isset($_GET['action']) && isset($_SESSION['user_id'])) {
     $user_id = $_SESSION['user_id'];
 
@@ -103,13 +111,15 @@ if (isset($_GET['action']) && isset($_SESSION['user_id'])) {
     }
 }
 
-// Configuration - UPDATED TO USE GOOGLE VISION OCR
+// Configuration - UPDATED TO USE TESSERACT OCR
 define('UPLOAD_DIR', 'uploads/');
 define('CLAUDE_API_KEY', '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'); // Add your Claude API key
 
-// GOOGLE VISION OCR CONFIGURATION - REPLACE WITH YOUR ACTUAL API KEY
-define('GOOGLE_VISION_API_KEY', 'AIzaSyCnXpawc5KOb-z9fTS__ngKV0Qtt1SdYbI'); // Replace with your Google Vision API key
-define('GOOGLE_VISION_API_URL', 'https://vision.googleapis.com/v1/images:annotate');
+// TESSERACT OCR CONFIGURATION
+define('TESSERACT_CMD', 'tesseract'); // Path to tesseract executable
+define('TESSERACT_LANG_DEFAULT', 'eng'); // Default language
+define('TESSERACT_LANG_THAI', 'tha'); // Thai language code
+define('TESSERACT_TEMP_DIR', sys_get_temp_dir()); // Temporary directory for processing
 
 // Database connection functions
 function getDBConnection()
@@ -262,7 +272,7 @@ function createSummaryTextFile($summary_content, $original_filename, $user_id, $
     // Add metadata footer
     $file_content .= str_repeat("=", 50) . "\n";
     $file_content .= "📊 TECHNICAL INFO:\n";
-    $file_content .= "  • OCR Technology: Google Vision API\n";
+    $file_content .= "  • OCR Technology: Tesseract OCR Engine\n";
     $file_content .= "  • AI Analysis: Claude (Anthropic)\n";
     $file_content .= "  • Processing Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
     $file_content .= "  • File Size: " . (file_exists($original_filename) ? formatFileSize(filesize($original_filename)) : 'Unknown') . "\n";
@@ -378,16 +388,11 @@ if (!function_exists('mb_ord')) {
     }
 }
 
-// COMPLETELY REWRITTEN: Google Vision OCR Function
+// UPDATED: Enhanced performOCR function using Tesseract OCR directly
 function performOCR($file_path)
 {
-    $api_key = GOOGLE_VISION_API_KEY;
-
-    // Validate API key
-    if (empty($api_key) || $api_key === 'YOUR_GOOGLE_VISION_API_KEY_HERE') {
-        error_log("Google Vision API key not configured properly");
-        return ['error' => 'Google Vision API key not configured', 'text' => false, 'debug' => 'Invalid API key'];
-    }
+    $debug_info = [];
+    $debug_info['method'] = 'Direct Tesseract OCR';
 
     // Validate file exists and is readable
     if (!file_exists($file_path)) {
@@ -400,14 +405,14 @@ function performOCR($file_path)
         return ['error' => 'File not readable', 'text' => false, 'debug' => 'File permissions issue'];
     }
 
-    // Check file size (Google Vision has 20MB limit)
+    // Check file size (reasonable limit for local processing)
     $file_size = filesize($file_path);
-    if ($file_size > 20 * 1024 * 1024) { // 20MB limit for Google Vision
+    if ($file_size > 50 * 1024 * 1024) { // 50MB limit
         error_log("OCR file too large: " . $file_size . " bytes");
-        return ['error' => 'File too large for OCR processing', 'text' => false, 'debug' => 'File exceeds 20MB limit'];
+        return ['error' => 'File too large for OCR processing', 'text' => false, 'debug' => 'File exceeds 50MB limit'];
     }
 
-    // Check file type
+    // Check file type - Tesseract supports PDF directly!
     $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
     $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp', 'pdf'];
     if (!in_array($file_extension, $allowed_extensions)) {
@@ -416,164 +421,111 @@ function performOCR($file_path)
     }
 
     try {
-        // Read and encode the file
-        $file_content = file_get_contents($file_path);
-        if ($file_content === false) {
-            error_log("Failed to read file content: " . $file_path);
-            return ['error' => 'Failed to read file', 'text' => false, 'debug' => 'File read error'];
-        }
+        // Create temporary output file
+        $temp_output = TESSERACT_TEMP_DIR . '/tesseract_output_' . uniqid();
+        
+        // Detect language from filename or use auto-detection
+        $detected_language = detectLanguageFromFilename($file_path);
+        $language_param = $detected_language === 'th' ? TESSERACT_LANG_THAI : TESSERACT_LANG_DEFAULT;
+        
+        // Add both languages for better results
+        $language_param = TESSERACT_LANG_DEFAULT . '+' . TESSERACT_LANG_THAI;
+        
+        // Build Tesseract command - DIRECT PROCESSING (works for PDF and images!)
+        $cmd = sprintf(
+            '%s "%s" "%s" -l %s --psm 1 --oem 3 2>&1',
+            TESSERACT_CMD,
+            escapeshellarg($file_path),
+            escapeshellarg($temp_output),
+            $language_param
+        );
 
-        $base64_content = base64_encode($file_content);
+        $debug_info['command'] = $cmd;
+        $debug_info['language'] = $language_param;
+        $debug_info['file_type'] = $file_extension;
 
-        // Prepare the request payload for Google Vision API
-        $request_data = [
-            'requests' => [
-                [
-                    'image' => [
-                        'content' => $base64_content
-                    ],
-                    'features' => [
-                        [
-                            'type' => 'TEXT_DETECTION',
-                            'maxResults' => 50
-                        ],
-                        [
-                            'type' => 'DOCUMENT_TEXT_DETECTION',
-                            'maxResults' => 50
-                        ]
-                    ],
-                    'imageContext' => [
-                        'languageHints' => ['en', 'th'] // Support both English and Thai
-                    ]
-                ]
-            ]
-        ];
+        error_log("Tesseract OCR Command: " . $cmd);
 
-        $url = GOOGLE_VISION_API_URL . '?key=' . $api_key;
+        // Execute Tesseract command
+        $output = shell_exec($cmd);
+        $debug_info['shell_output'] = $output;
 
-        // Enhanced logging
-        error_log("Google Vision OCR Request - File: " . basename($file_path) . ", Size: " . $file_size . " bytes");
+        // Read the output file
+        $output_file = $temp_output . '.txt';
+        if (file_exists($output_file)) {
+            $extracted_text = file_get_contents($output_file);
+            
+            // Clean up temporary files
+            unlink($output_file);
 
-        // Make the API request
-        $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'User-Agent: StudyOrganizer/1.0'
-        ]);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($request_data));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 120);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
-        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-        curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
-
-        $response = curl_exec($ch);
-        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        $curl_error = curl_error($ch);
-        curl_close($ch);
-
-        error_log("Google Vision API Response Code: " . $http_code);
-        error_log("Google Vision API Response Preview: " . substr($response, 0, 200));
-
-        if ($curl_error) {
-            error_log("Google Vision CURL Error: " . $curl_error);
-            return ['error' => 'Network error: ' . $curl_error, 'text' => false, 'debug' => 'CURL failed'];
-        }
-
-        if ($http_code === 200 && !empty($response)) {
-            $result = json_decode($response, true);
-
-            if (json_last_error() !== JSON_ERROR_NONE) {
-                error_log("Google Vision JSON decode error: " . json_last_error_msg());
-                return ['error' => 'Invalid response format', 'text' => false, 'debug' => 'JSON parsing failed'];
-            }
-
-            // Check for API errors
-            if (isset($result['error'])) {
-                $error_msg = $result['error']['message'] ?? 'Unknown Google Vision API error';
-                error_log("Google Vision API Error: " . $error_msg);
-                return ['error' => 'Google Vision API error: ' . $error_msg, 'text' => false, 'debug' => 'API error response'];
-            }
-
-            // Extract text from the response
-            $extracted_text = '';
-
-            if (isset($result['responses']) && !empty($result['responses'])) {
-                $response_data = $result['responses'][0];
-
-                // Try DOCUMENT_TEXT_DETECTION first (better for structured documents)
-                if (isset($response_data['fullTextAnnotation']['text'])) {
-                    $extracted_text = $response_data['fullTextAnnotation']['text'];
-                    error_log("Google Vision: Using DOCUMENT_TEXT_DETECTION");
-                }
-                // Fallback to TEXT_DETECTION
-                elseif (isset($response_data['textAnnotations']) && !empty($response_data['textAnnotations'])) {
-                    $extracted_text = $response_data['textAnnotations'][0]['description'] ?? '';
-                    error_log("Google Vision: Using TEXT_DETECTION");
-                }
-
-                // Clean up the extracted text
-                $extracted_text = trim($extracted_text);
-
-                if (!empty($extracted_text)) {
-                    $word_count = str_word_count($extracted_text);
-                    $char_count = mb_strlen($extracted_text, 'UTF-8');
-                    error_log("Google Vision OCR Success - Extracted {$word_count} words, {$char_count} characters");
-
-                    return [
-                        'error' => null,
-                        'text' => $extracted_text,
-                        'debug' => "Google Vision OCR successful - {$word_count} words, {$char_count} characters extracted"
-                    ];
-                } else {
-                    error_log("Google Vision returned empty text");
-                    return ['error' => 'No text found in document', 'text' => false, 'debug' => 'Empty OCR result'];
-                }
+            // Validate extracted text
+            $extracted_text = trim($extracted_text);
+            if (!empty($extracted_text) && strlen($extracted_text) > 5) {
+                $word_count = str_word_count($extracted_text);
+                $char_count = mb_strlen($extracted_text, 'UTF-8');
+                
+                error_log("Tesseract OCR Success - Extracted {$word_count} words, {$char_count} characters");
+                
+                return [
+                    'error' => null,
+                    'text' => $extracted_text,
+                    'debug' => "Tesseract OCR successful - {$word_count} words, {$char_count} characters extracted",
+                    'language_detected' => $detected_language
+                ];
             } else {
-                error_log("Google Vision: No text annotations in response");
-                return ['error' => 'No text content detected', 'text' => false, 'debug' => 'No text annotations'];
+                error_log("Tesseract returned empty or minimal text");
+                return ['error' => 'No meaningful text found in document', 'text' => false, 'debug' => 'Minimal OCR result'];
             }
         } else {
-            // Handle specific HTTP error codes
-            $error_message = "HTTP Error $http_code";
-            switch ($http_code) {
-                case 400:
-                    $error_message = "Bad request - Invalid image or request format";
-                    break;
-                case 401:
-                    $error_message = "Invalid API key or authentication failed";
-                    break;
-                case 403:
-                    $error_message = "API key limit exceeded or permission denied";
-                    break;
-                case 429:
-                    $error_message = "Rate limit exceeded";
-                    break;
-                case 500:
-                    $error_message = "Google Vision service temporary error";
-                    break;
-                case 503:
-                    $error_message = "Google Vision service unavailable";
-                    break;
-            }
-
-            error_log("Google Vision HTTP Error: $http_code - $error_message");
-            return ['error' => $error_message, 'text' => false, 'debug' => "HTTP $http_code"];
+            error_log("Tesseract output file not created: " . $output_file);
+            return ['error' => 'Tesseract processing failed', 'text' => false, 'debug' => 'No output file created: ' . $output];
         }
     } catch (Exception $e) {
-        error_log("Google Vision OCR Exception: " . $e->getMessage());
+        // Clean up on error
+        if (isset($temp_output) && file_exists($temp_output . '.txt')) {
+            unlink($temp_output . '.txt');
+        }
+
+        error_log("Tesseract OCR Exception: " . $e->getMessage());
         return ['error' => 'OCR processing exception: ' . $e->getMessage(), 'text' => false, 'debug' => 'Exception occurred'];
     }
 }
 
-// Extract text from PDF
+// Helper function to detect language from filename
+function detectLanguageFromFilename($filename)
+{
+    $basename = basename($filename);
+    // Simple heuristic: look for Thai characters in filename
+    if (preg_match('/[\x{0E00}-\x{0E7F}]/u', $basename)) {
+        return 'th';
+    }
+    return 'en';
+}
+
+// UPDATED: Simplified PDF processing function using Tesseract directly
 function extractTextFromPDF($file_path)
 {
+    error_log("PDF processing: Using direct Tesseract approach");
+
+    // Method 1: Try pdftotext (fastest for text-based PDFs)
     $content = shell_exec("pdftotext '$file_path' -");
-    return $content ? trim($content) : false;
+    if ($content && strlen(trim($content)) > 50) {
+        error_log("PDF text extraction: pdftotext successful, " . strlen($content) . " characters");
+        return trim($content);
+    }
+
+    error_log("PDF text extraction: pdftotext failed, trying direct Tesseract OCR");
+
+    // Method 2: Use Tesseract directly on PDF (no ImageMagick needed!)
+    $ocr_result = performOCR($file_path);
+    if ($ocr_result['text']) {
+        error_log("PDF text extraction: Direct Tesseract successful, " . strlen($ocr_result['text']) . " characters");
+        return $ocr_result['text'];
+    }
+
+    // Both methods failed
+    error_log("PDF text extraction: All methods failed");
+    return false;
 }
 
 // UPDATED: Analyze with Claude - Enhanced with multilingual language detection
@@ -873,11 +825,11 @@ If the content is primarily in English, respond like this:
     ];
 }
 
-// UPDATED: Process uploaded file with enhanced debugging and error handling
+// UPDATED: Process uploaded file with simplified Tesseract OCR
 function processUploadedFile($uploaded_file)
 {
     $debug_info = [];
-    $debug_info['function_start'] = 'processUploadedFile started';
+    $debug_info['function_start'] = 'processUploadedFile started - SIMPLIFIED TESSERACT MODE';
 
     $file_extension = strtolower(pathinfo($uploaded_file['name'], PATHINFO_EXTENSION));
     $user_id = $_SESSION['user_id'];
@@ -906,21 +858,20 @@ function processUploadedFile($uploaded_file)
     $debug_info['file_moved'] = 'File moved successfully to temp location';
     $extracted_text = '';
 
-    // Text extraction phase
+    // Simplified text extraction using Tesseract directly
     if ($file_extension === 'pdf') {
-        $debug_info['processing_type'] = 'PDF - trying pdftotext first';
+        $debug_info['processing_type'] = 'PDF - Direct Tesseract OCR (no ImageMagick)';
+
+        // Use the simplified PDF extraction
         $extracted_text = extractTextFromPDF($temp_upload_path);
 
-        if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
-            $debug_info['pdf_text_extraction'] = 'pdftotext failed or returned minimal text, trying OCR';
-            $ocr_result = performOCR($temp_upload_path);
-            $debug_info['ocr_result'] = $ocr_result;
-            $extracted_text = $ocr_result['text'];
+        if ($extracted_text) {
+            $debug_info['pdf_processing'] = 'SUCCESS - Direct Tesseract extraction';
         } else {
-            $debug_info['pdf_text_extraction'] = 'pdftotext successful, extracted ' . strlen($extracted_text) . ' characters';
+            $debug_info['pdf_processing'] = 'FAILED - could not extract text with Tesseract';
         }
     } elseif (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp'])) {
-        $debug_info['processing_type'] = 'Image - using OCR';
+        $debug_info['processing_type'] = 'Image - Direct Tesseract OCR';
         $ocr_result = performOCR($temp_upload_path);
         $debug_info['ocr_result'] = $ocr_result;
         $extracted_text = $ocr_result['text'];
@@ -929,7 +880,7 @@ function processUploadedFile($uploaded_file)
     }
 
     $debug_info['extracted_text_length'] = $extracted_text ? strlen($extracted_text) : 0;
-    $debug_info['extracted_text_preview'] = $extracted_text ? substr($extracted_text, 0, 100) . '...' : 'No text extracted';
+    $debug_info['extracted_text_preview'] = $extracted_text ? substr($extracted_text, 0, 200) . '...' : 'No text extracted';
 
     // Check if we have sufficient text for analysis
     if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
@@ -943,14 +894,14 @@ function processUploadedFile($uploaded_file)
 
         return [
             'subject' => 'Others',
-            'summary' => 'Could not extract sufficient text from file. Please ensure the file contains readable text.',
+            'summary' => 'Could not extract sufficient text from file. Please ensure the file contains clear, readable text for Tesseract OCR processing.',
             'language' => 'en',
             'status' => 'error',
             'debug' => $debug_info
         ];
     }
 
-    // AI Analysis phase
+    // AI Analysis phase (unchanged)
     $debug_info['ai_analysis'] = 'Starting AI analysis with Claude';
     try {
         $analysis = analyzeWithClaude($extracted_text, $uploaded_file['name']);
@@ -980,7 +931,7 @@ function processUploadedFile($uploaded_file)
     $debug_info['analysis_subject'] = $subject;
     $debug_info['analysis_language'] = $language;
 
-    // File organization phase
+    // File organization phase (unchanged)
     $subject_upload_path = getUserUploadPath($user_id, $subject);
     if (!file_exists($subject_upload_path)) {
         if (!mkdir($subject_upload_path, 0755, true)) {
@@ -1023,7 +974,7 @@ function processUploadedFile($uploaded_file)
         ];
     }
 
-    // Summary file creation
+    // Summary file creation (unchanged)
     try {
         $summary_file_path = createSummaryTextFile(
             $analysis['summary'],
@@ -1039,7 +990,7 @@ function processUploadedFile($uploaded_file)
         $summary_file_path = null;
     }
 
-    // Database storage
+    // Database storage (unchanged)
     try {
         $db_result = saveFileToDatabase(
             $user_id,
@@ -1064,7 +1015,7 @@ function processUploadedFile($uploaded_file)
         ];
     }
 
-    $debug_info['success'] = 'File processed successfully';
+    $debug_info['success'] = 'File processed successfully - SIMPLIFIED TESSERACT MODE';
     $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
 
     return [
@@ -1237,7 +1188,7 @@ function deleteUserFile($file_id, $user_id)
     return false;
 }
 
-// UPDATED: reanalyzeFile function to handle language detection with Google Vision
+// UPDATED: reanalyzeFile function with simplified Tesseract processing
 function reanalyzeFile($file_id, $user_id)
 {
     $pdo = getDBConnection();
@@ -1254,11 +1205,8 @@ function reanalyzeFile($file_id, $user_id)
     $extracted_text = '';
 
     if ($file_extension === 'pdf') {
+        // Use simplified PDF processing with direct Tesseract
         $extracted_text = extractTextFromPDF($file['original_file_path']);
-        if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
-            $ocr_result = performOCR($file['original_file_path']);
-            $extracted_text = $ocr_result['text'];
-        }
     } else if (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp'])) {
         $ocr_result = performOCR($file['original_file_path']);
         $extracted_text = $ocr_result['text'];
@@ -1357,7 +1305,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['uploaded_file'])) {
             $_SESSION['last_upload_debug']['processing_result'] = $processing_result;
 
             if ($processing_result['status'] === 'completed') {
-                $_SESSION['last_upload_debug']['final_status'] = 'SUCCESS: File processed and saved';
+                $_SESSION['last_upload_debug']['final_status'] = 'SUCCESS: File processed and saved with simplified Tesseract OCR';
             } else {
                 $_SESSION['last_upload_debug']['final_status'] = 'ERROR: Processing failed - ' . $processing_result['summary'];
             }
@@ -1433,6 +1381,9 @@ function getSubjectIcon($subject)
     ];
     return $icons[$subject] ?? '📄';
 }
+
+// Continue with your existing HTML output...
+// [The rest of your HTML code remains the same]
 ?>
 
 <!DOCTYPE html>
@@ -2023,22 +1974,25 @@ function getSubjectIcon($subject)
 
                             <div class="bg-black bg-opacity-30 rounded p-3">
                                 <h4 class="text-yellow-300 font-medium mb-2">🔧 Configuration Check:</h4>
-                                <p class="text-yellow-100">Google Vision API Key: <?php echo (GOOGLE_VISION_API_KEY === 'YOUR_GOOGLE_VISION_API_KEY_HERE') ? '❌ NOT CONFIGURED' : '✅ Configured'; ?></p>
+                                <p class="text-yellow-100">Tesseract OCR: <?php echo (shell_exec('tesseract --version 2>&1') && strpos(shell_exec('tesseract --version 2>&1'), 'tesseract') !== false) ? '✅ Installed' : '❌ Not Found'; ?></p>
                                 <p class="text-yellow-100">Claude API Key: <?php echo (empty(CLAUDE_API_KEY)) ? '❌ NOT CONFIGURED' : '✅ Configured'; ?></p>
                                 <p class="text-yellow-100">Upload Directory: <?php echo is_writable(UPLOAD_DIR) ? '✅ Writable' : '❌ Not Writable'; ?></p>
+                                <p class="text-yellow-100">pdftotext Tool: <?php echo (shell_exec('pdftotext -v 2>&1') && strpos(shell_exec('pdftotext -v 2>&1'), 'pdftotext') !== false) ? '✅ Available' : '❌ Not Available'; ?></p>
                                 <p class="text-yellow-100">PHP Upload Max: <?php echo ini_get('upload_max_filesize'); ?></p>
                                 <p class="text-yellow-100">PHP Post Max: <?php echo ini_get('post_max_size'); ?></p>
                             </div>
 
-                            <?php if (GOOGLE_VISION_API_KEY === 'YOUR_GOOGLE_VISION_API_KEY_HERE'): ?>
+                            <?php if (!(shell_exec('tesseract --version 2>&1') && strpos(shell_exec('tesseract --version 2>&1'), 'tesseract') !== false)): ?>
                                 <div class="bg-red-900 bg-opacity-50 border border-red-600 rounded p-3">
                                     <h4 class="text-red-300 font-medium mb-2">⚠️ Configuration Issue:</h4>
-                                    <p class="text-red-200 text-sm">Google Vision API key is not configured. Please:</p>
+                                    <p class="text-red-200 text-sm">Tesseract OCR is not installed or not accessible. Please:</p>
                                     <ol class="text-red-200 text-sm mt-2 ml-4 list-decimal">
-                                        <li>Go to <a href="https://console.cloud.google.com/" target="_blank" class="text-blue-300 underline">Google Cloud Console</a></li>
-                                        <li>Enable the "Cloud Vision API"</li>
-                                        <li>Create an API key</li>
-                                        <li>Replace 'YOUR_GOOGLE_VISION_API_KEY_HERE' in the code with your actual API key</li>
+                                        <li>Install Tesseract OCR on your server</li>
+                                        <li>For Ubuntu/Debian: <code>sudo apt-get install tesseract-ocr tesseract-ocr-tha</code></li>
+                                        <li>For CentOS/RHEL: <code>sudo yum install tesseract</code></li>
+                                        <li>For additional language support: <code>sudo apt-get install tesseract-ocr-tha</code> (for Thai)</li>
+                                        <li>Verify installation: <code>tesseract --version</code></li>
+                                        <li><strong>Note:</strong> This simplified version uses Tesseract directly - no ImageMagick required!</li>
                                     </ol>
                                 </div>
                             <?php endif; ?>
@@ -2082,8 +2036,8 @@ function getSubjectIcon($subject)
                                 <div class="bg-theme-bright rounded-lg p-3 sm:p-4 border-l-4 border-theme-green">
                                     <div class="flex items-center justify-between">
                                         <div class="flex-1">
-                                            <p class="text-black font-medium text-sm sm:text-base">🌏 AI-Powered with Google Vision OCR</p>
-                                            <p class="text-black text-xs sm:text-sm mt-1">Enhanced OCR accuracy with Google's advanced text recognition. AI generates detailed summaries with bullet points, key concepts, and important keywords in Thai or English.</p>
+                                            <p class="text-black font-medium text-sm sm:text-base">🖥️ AI-Powered with Tesseract OCR</p>
+                                            <p class="text-black text-xs sm:text-sm mt-1">Enhanced OCR accuracy with local Tesseract processing. AI generates detailed summaries with bullet points, key concepts, and important keywords in Thai or English.</p>
                                         </div>
                                         <button onclick="testAPIConfiguration()" class="ml-4 px-3 py-1 bg-theme-medium hover:bg-theme-dark text-white rounded text-xs font-medium btn-touch flex-shrink-0">
                                             Test Setup
@@ -2131,7 +2085,7 @@ function getSubjectIcon($subject)
                                                     <p>1. Click "Test Setup" button above to verify your configuration</p>
                                                     <p>2. If setup is complete, try uploading a PDF or image</p>
                                                     <p>3. If upload fails, check the debug information</p>
-                                                    <p>4. Make sure your Google Vision API key is configured</p>
+                                                    <p>4. Make sure Tesseract OCR is installed on your server</p>
                                                 </div>
                                             </div>
                                         </div>
@@ -3231,9 +3185,9 @@ function getSubjectIcon($subject)
                     <div class="glass-card rounded-xl sm:rounded-2xl p-6 sm:p-8 text-center max-w-md mx-auto border-theme-light">
                         <div class="animate-spin rounded-full h-12 w-12 sm:h-16 sm:w-16 border-b-4 border-theme-green mx-auto mb-4 sm:mb-6"></div>
                         <h3 class="text-lg sm:text-xl font-semibold text-white mb-2">Processing your file...</h3>
-                        <p class="text-gray-300 mb-2 text-sm sm:text-base">Google Vision OCR and enhanced AI analysis in progress</p>
+                        <p class="text-gray-300 mb-2 text-sm sm:text-base">Tesseract OCR and enhanced AI analysis in progress</p>
                         <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 mt-4">
-                            <p class="text-black text-xs sm:text-sm">🌏 Creating detailed summaries with bullet points, key concepts, and important keywords</p>
+                            <p class="text-black text-xs sm:text-sm">🖥️ Creating detailed summaries with bullet points, key concepts, and important keywords using direct Tesseract processing</p>
                         </div>
                     </div>
                 `;
@@ -3310,7 +3264,7 @@ function getSubjectIcon($subject)
             }
         });
 
-        // API Configuration Test Function
+        // API Configuration Test Function - Updated for Tesseract
         function testAPIConfiguration() {
             // Show loading state
             const testButton = event.target;
@@ -3357,16 +3311,18 @@ function getSubjectIcon($subject)
                     </div>
                 `;
             } else {
-                // Google Vision results
-                if (results.google_vision) {
-                    const gv = results.google_vision;
-                    const statusColor = gv.status === 'success' ? 'green' : gv.status === 'warning' ? 'yellow' : 'red';
-                    const statusIcon = gv.status === 'success' ? '✅' : gv.status === 'warning' ? '⚠️' : '❌';
+                // Tesseract results
+                if (results.tesseract) {
+                    const ts = results.tesseract;
+                    const statusColor = ts.status === 'success' ? 'green' : 'red';
+                    const statusIcon = ts.status === 'success' ? '✅' : '❌';
 
                     modalContent += `
                         <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
-                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} Google Vision API</h4>
-                            <p class="text-${statusColor}-200">${gv.message}</p>
+                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} Tesseract OCR Engine</h4>
+                            <p class="text-${statusColor}-200">${ts.message}</p>
+                            ${ts.version ? `<p class="text-${statusColor}-200 text-sm mt-1">Version: ${ts.version}</p>` : ''}
+                            ${ts.languages ? `<p class="text-${statusColor}-200 text-sm mt-1">${ts.languages}</p>` : ''}
                         </div>
                     `;
                 }
@@ -3399,6 +3355,20 @@ function getSubjectIcon($subject)
                     `;
                 }
 
+                // pdftotext results
+                if (results.pdftotext) {
+                    const pt = results.pdftotext;
+                    const statusColor = pt.status === 'success' ? 'green' : 'yellow';
+                    const statusIcon = pt.status === 'success' ? '✅' : '⚠️';
+
+                    modalContent += `
+                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
+                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} pdftotext Tool</h4>
+                            <p class="text-${statusColor}-200">${pt.message}</p>
+                        </div>
+                    `;
+                }
+
                 // Next steps
                 modalContent += `
                     <div class="bg-blue-900 bg-opacity-50 border border-blue-600 rounded-lg p-4">
@@ -3406,20 +3376,23 @@ function getSubjectIcon($subject)
                         <div class="text-blue-200 text-sm space-y-2">
                 `;
 
-                if (results.google_vision && results.google_vision.status !== 'success') {
+                if (results.tesseract && results.tesseract.status !== 'success') {
                     modalContent += `
-                        <p>• Configure Google Vision API key in the dashboard.php file</p>
-                        <p>• Visit <a href="https://console.cloud.google.com/" target="_blank" class="text-blue-300 underline">Google Cloud Console</a> to get an API key</p>
+                        <p>• Install Tesseract OCR on your server</p>
+                        <p>• For Ubuntu/Debian: <code>sudo apt-get install tesseract-ocr tesseract-ocr-tha</code></p>
+                        <p>• For CentOS/RHEL: <code>sudo yum install tesseract</code></p>
+                        <p>• Verify installation: <code>tesseract --version</code></p>
                     `;
                 }
 
-                if (results.google_vision && results.google_vision.status === 'success') {
-                    modalContent += `<p>• ✅ Google Vision API is ready to use</p>`;
+                if (results.tesseract && results.tesseract.status === 'success') {
+                    modalContent += `<p>• ✅ Tesseract OCR is ready to use (simplified version - no ImageMagick required!)</p>`;
                 }
 
                 modalContent += `
                         <p>• Try uploading a test image or PDF to verify the complete workflow</p>
                         <p>• Check the debug information if uploads still fail</p>
+                        <p>• This simplified version processes PDFs directly with Tesseract</p>
                         </div>
                     </div>
                 `;
@@ -3445,13 +3418,15 @@ function getSubjectIcon($subject)
                 }
             });
         }
+
+        // Touch support for mobile devices
         if ('ontouchstart' in window) {
             document.addEventListener('touchstart', function() {}, {
                 passive: true
             });
         }
 
-        console.log('All event listeners set up successfully with Google Vision OCR support');
+        console.log('All event listeners set up successfully with simplified Tesseract OCR support');
     </script>
 </body>
 
