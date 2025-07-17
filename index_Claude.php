@@ -15,7 +15,70 @@ if (isset($_GET['action']) && $_GET['action'] === 'logout') {
     logout(); // This will redirect to login.php
 }
 
-// Handle file viewing/download/delete/reanalyze requests
+// Handle API test request
+if (isset($_GET['action']) && $_GET['action'] === 'test_api') {
+    header('Content-Type: application/json');
+
+    $test_results = [];
+
+    // Test Google Vision API
+    $test_results['google_vision'] = [];
+    if (GOOGLE_VISION_API_KEY === 'YOUR_GOOGLE_VISION_API_KEY_HERE') {
+        $test_results['google_vision']['status'] = 'error';
+        $test_results['google_vision']['message'] = 'API key not configured';
+    } else {
+        // Test with a simple API call
+        $test_url = GOOGLE_VISION_API_URL . '?key=' . GOOGLE_VISION_API_KEY;
+        $test_data = ['requests' => [['image' => ['content' => ''], 'features' => [['type' => 'TEXT_DETECTION']]]]];
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $test_url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($test_data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+
+        if ($http_code === 400) {
+            // 400 is expected for empty image, but means API key works
+            $test_results['google_vision']['status'] = 'success';
+            $test_results['google_vision']['message'] = 'API key is valid and accessible';
+        } elseif ($http_code === 401 || $http_code === 403) {
+            $test_results['google_vision']['status'] = 'error';
+            $test_results['google_vision']['message'] = 'Invalid API key or permission denied';
+        } else {
+            $test_results['google_vision']['status'] = 'warning';
+            $test_results['google_vision']['message'] = "Unexpected response: HTTP $http_code";
+        }
+    }
+
+    // Test Claude API
+    $test_results['claude'] = [];
+    if (empty(CLAUDE_API_KEY)) {
+        $test_results['claude']['status'] = 'error';
+        $test_results['claude']['message'] = 'Claude API key not configured';
+    } else {
+        $test_results['claude']['status'] = 'info';
+        $test_results['claude']['message'] = 'Claude API key is configured (test requires actual content)';
+    }
+
+    // Test file system
+    $test_results['filesystem'] = [];
+    if (!is_writable(UPLOAD_DIR)) {
+        $test_results['filesystem']['status'] = 'error';
+        $test_results['filesystem']['message'] = 'Upload directory is not writable';
+    } else {
+        $test_results['filesystem']['status'] = 'success';
+        $test_results['filesystem']['message'] = 'Upload directory is writable';
+    }
+
+    echo json_encode($test_results);
+    exit();
+}
 if (isset($_GET['action']) && isset($_SESSION['user_id'])) {
     $user_id = $_SESSION['user_id'];
 
@@ -40,10 +103,13 @@ if (isset($_GET['action']) && isset($_SESSION['user_id'])) {
     }
 }
 
-// Configuration
+// Configuration - UPDATED TO USE GOOGLE VISION OCR
 define('UPLOAD_DIR', 'uploads/');
 define('CLAUDE_API_KEY', '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'); // Add your Claude API key
-define('OCR_SPACE_API_KEY', 'K83046822188957'); // Add your OCR.space API key
+
+// GOOGLE VISION OCR CONFIGURATION - REPLACE WITH YOUR ACTUAL API KEY
+define('GOOGLE_VISION_API_KEY', 'AIzaSyCnXpawc5KOb-z9fTS__ngKV0Qtt1SdYbI'); // Replace with your Google Vision API key
+define('GOOGLE_VISION_API_URL', 'https://vision.googleapis.com/v1/images:annotate');
 
 // Database connection functions
 function getDBConnection()
@@ -62,22 +128,44 @@ function getDBConnection()
     }
 }
 
-// Save file to database
-function saveFileToDatabase($user_id, $file_name, $subject, $file_type, $original_file_path, $summary_file_path)
+// UPDATED: Save file to database with language support
+function saveFileToDatabase($user_id, $file_name, $subject, $file_type, $original_file_path, $summary_file_path, $language = 'en')
 {
     $pdo = getDBConnection();
 
-    $sql = "INSERT INTO user_files (user_id, file_name, subject, file_type, original_file_path, summary_file_path) 
-            VALUES (?, ?, ?, ?, ?, ?)";
+    // Check if language column exists, if not add it
+    try {
+        $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
+        if ($check_column->rowCount() == 0) {
+            $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
+            error_log("Added language column to user_files table");
+        }
+    } catch (Exception $e) {
+        error_log("Error checking/adding language column: " . $e->getMessage());
+    }
+
+    $sql = "INSERT INTO user_files (user_id, file_name, subject, file_type, language, original_file_path, summary_file_path) 
+            VALUES (?, ?, ?, ?, ?, ?, ?)";
 
     $stmt = $pdo->prepare($sql);
-    return $stmt->execute([$user_id, $file_name, $subject, $file_type, $original_file_path, $summary_file_path]);
+    return $stmt->execute([$user_id, $file_name, $subject, $file_type, $language, $original_file_path, $summary_file_path]);
 }
 
-// Get user files from database
+// UPDATED: Get user files from database with language information
 function getUserFiles($user_id)
 {
     $pdo = getDBConnection();
+
+    // Check if language column exists, if not add it with default value
+    try {
+        $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
+        if ($check_column->rowCount() == 0) {
+            $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
+            error_log("Added language column to user_files table");
+        }
+    } catch (Exception $e) {
+        error_log("Error checking/adding language column: " . $e->getMessage());
+    }
 
     $sql = "SELECT *, DATE(created_at) as date FROM user_files WHERE user_id = ? ORDER BY created_at DESC";
     $stmt = $pdo->prepare($sql);
@@ -95,16 +183,26 @@ function getUserFiles($user_id)
             $summary_content = substr($full_summary, 0, 200) . '...';
         }
 
+        // Get language info (default to English if not set)
+        $file_language = isset($file['language']) ? $file['language'] : 'en';
+
+        // Set appropriate "No summary" message based on language
+        if ($summary_content === 'No summary available') {
+            $summary_content = ($file_language === 'th') ? 'ไม่มีข้อมูลสรุป' : 'No summary available';
+            $full_summary = $summary_content;
+        }
+
         $formatted_files[] = [
             'id' => $file['id'],
             'name' => $file['file_name'],
             'subject' => $file['subject'],
             'date' => $file['date'],
             'summary' => $summary_content,
-            'full_summary' => $full_summary, // Add this for modal
+            'full_summary' => $full_summary,
+            'language' => $file_language,
             'status' => 'completed',
             'debug_info' => '',
-            'extracted_text' => '', // This would need to be stored or regenerated
+            'extracted_text' => '',
             'summary_file_path' => $file['summary_file_path'],
             'original_file_path' => $file['original_file_path']
         ];
@@ -113,8 +211,8 @@ function getUserFiles($user_id)
     return $formatted_files;
 }
 
-// Create summary text file
-function createSummaryTextFile($summary_content, $original_filename, $user_id, $subject)
+// UPDATED: Create enhanced summary text file with better formatting for structured content
+function createSummaryTextFile($summary_content, $original_filename, $user_id, $subject, $language = 'en', $alt_summary = '')
 {
     $summary_dir = "uploads/user_$user_id/$subject/summaries/";
 
@@ -125,9 +223,66 @@ function createSummaryTextFile($summary_content, $original_filename, $user_id, $
     $summary_filename = pathinfo($original_filename, PATHINFO_FILENAME) . '_summary.txt';
     $summary_path = $summary_dir . $summary_filename;
 
-    file_put_contents($summary_path, $summary_content);
+    // Create enhanced content with better formatting
+    $file_content = "📄 DOCUMENT ANALYSIS SUMMARY\n";
+    $file_content .= str_repeat("=", 50) . "\n\n";
+
+    // Add document info
+    $file_content .= "📋 Document: " . $original_filename . "\n";
+    $file_content .= "📚 Subject: " . $subject . "\n";
+    $file_content .= "🌐 Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
+    $file_content .= "📅 Generated: " . date('Y-m-d H:i:s') . "\n\n";
+
+    $file_content .= str_repeat("-", 50) . "\n\n";
+
+    // Add main summary with better formatting
+    $file_content .= "🤖 AI ANALYSIS:\n\n";
+
+    // Clean up and format the summary content
+    $formatted_summary = $summary_content;
+
+    // Replace bullet points with better formatting
+    $formatted_summary = str_replace('•', '  •', $formatted_summary);
+
+    // Add proper spacing around sections
+    $formatted_summary = preg_replace('/\[([^\]]+)\]:/', "\n📌 $1:", $formatted_summary);
+
+    $file_content .= $formatted_summary . "\n\n";
+
+    // Add alternative language summary if available
+    if (!empty($alt_summary)) {
+        $separator = "\n" . str_repeat("-", 50) . "\n\n";
+        if ($language === 'th') {
+            $file_content .= $separator . "🇺🇸 ENGLISH SUMMARY:\n\n" . $alt_summary . "\n\n";
+        } else {
+            $file_content .= $separator . "🇹🇭 สรุปภาษาไทย:\n\n" . $alt_summary . "\n\n";
+        }
+    }
+
+    // Add metadata footer
+    $file_content .= str_repeat("=", 50) . "\n";
+    $file_content .= "📊 TECHNICAL INFO:\n";
+    $file_content .= "  • OCR Technology: Google Vision API\n";
+    $file_content .= "  • AI Analysis: Claude (Anthropic)\n";
+    $file_content .= "  • Processing Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
+    $file_content .= "  • File Size: " . (file_exists($original_filename) ? formatFileSize(filesize($original_filename)) : 'Unknown') . "\n";
+    $file_content .= str_repeat("=", 50) . "\n";
+
+    file_put_contents($summary_path, $file_content);
 
     return $summary_path;
+}
+
+// Helper function to format file sizes
+function formatFileSize($bytes, $precision = 2)
+{
+    $units = array('B', 'KB', 'MB', 'GB', 'TB');
+
+    for ($i = 0; $bytes > 1024; $i++) {
+        $bytes /= 1024;
+    }
+
+    return round($bytes, $precision) . ' ' . $units[$i];
 }
 
 // Create user-specific folder structure
@@ -177,15 +332,61 @@ function getUserUploadPath($user_id, $subject = 'Others')
     return UPLOAD_DIR . 'user_' . $user_id . '/' . $subject . '/';
 }
 
-// OCR Function using OCR.space API with enhanced error handling and retry mechanism
+// NEW: Helper function to detect language from content
+function detectLanguageFromContent($text_content)
+{
+    // Count Thai characters vs English characters
+    $thai_chars = 0;
+    $english_chars = 0;
+
+    // Convert to UTF-8 if needed
+    $text = mb_convert_encoding($text_content, 'UTF-8', 'auto');
+
+    // Count characters
+    $length = mb_strlen($text, 'UTF-8');
+    for ($i = 0; $i < $length; $i++) {
+        $char = mb_substr($text, $i, 1, 'UTF-8');
+        $unicode = mb_ord($char, 'UTF-8');
+
+        // Thai Unicode range: 0x0E00-0x0E7F
+        if ($unicode >= 0x0E00 && $unicode <= 0x0E7F) {
+            $thai_chars++;
+        }
+        // English characters (basic Latin): 0x0041-0x005A, 0x0061-0x007A
+        elseif (($unicode >= 0x0041 && $unicode <= 0x005A) || ($unicode >= 0x0061 && $unicode <= 0x007A)) {
+            $english_chars++;
+        }
+    }
+
+    // Determine primary language
+    if ($thai_chars > $english_chars && $thai_chars > 10) {
+        return 'th';
+    } else {
+        return 'en';
+    }
+}
+
+// NEW: Helper function to get ordinal value of multibyte character
+if (!function_exists('mb_ord')) {
+    function mb_ord($char, $encoding = 'UTF-8')
+    {
+        if ($encoding === 'UTF-8') {
+            $char = mb_convert_encoding($char, 'UCS-4BE', 'UTF-8');
+            return unpack('N', $char)[1];
+        }
+        return ord($char);
+    }
+}
+
+// COMPLETELY REWRITTEN: Google Vision OCR Function
 function performOCR($file_path)
 {
-    $api_key = OCR_SPACE_API_KEY;
+    $api_key = GOOGLE_VISION_API_KEY;
 
     // Validate API key
-    if (empty($api_key) || $api_key === 'YOUR_OCR_API_KEY') {
-        error_log("OCR.space API key not configured properly");
-        return ['error' => 'OCR.space API key not configured', 'text' => false, 'debug' => 'Invalid API key'];
+    if (empty($api_key) || $api_key === 'YOUR_GOOGLE_VISION_API_KEY_HERE') {
+        error_log("Google Vision API key not configured properly");
+        return ['error' => 'Google Vision API key not configured', 'text' => false, 'debug' => 'Invalid API key'];
     }
 
     // Validate file exists and is readable
@@ -199,146 +400,172 @@ function performOCR($file_path)
         return ['error' => 'File not readable', 'text' => false, 'debug' => 'File permissions issue'];
     }
 
-    // Check file size (OCR.space has limits)
+    // Check file size (Google Vision has 20MB limit)
     $file_size = filesize($file_path);
-    if ($file_size > 10 * 1024 * 1024) { // 10MB limit
+    if ($file_size > 20 * 1024 * 1024) { // 20MB limit for Google Vision
         error_log("OCR file too large: " . $file_size . " bytes");
-        return ['error' => 'File too large for OCR processing', 'text' => false, 'debug' => 'File exceeds 10MB limit'];
+        return ['error' => 'File too large for OCR processing', 'text' => false, 'debug' => 'File exceeds 20MB limit'];
     }
 
     // Check file type
     $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-    $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'pdf'];
+    $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp', 'pdf'];
     if (!in_array($file_extension, $allowed_extensions)) {
         error_log("OCR unsupported file type: " . $file_extension);
         return ['error' => 'Unsupported file type for OCR', 'text' => false, 'debug' => 'File type not supported'];
     }
 
-    $url = "https://api.ocr.space/parse/image";
-
-    // Enhanced OCR parameters for better accuracy
-    $post_data = [
-        'apikey' => $api_key,
-        'language' => 'eng',
-        'isOverlayRequired' => 'false',
-        'file' => new CURLFile($file_path),
-        'detectOrientation' => 'true',
-        'isTable' => 'true',
-        'OCREngine' => '2', // Use OCR Engine 2 for better accuracy
-        'scale' => 'true',   // Auto-scale for better text detection
-        'isCreateSearchablePdf' => 'false',
-        'isSearchablePdfHideTextLayer' => 'false'
-    ];
-
-    $ch = curl_init();
-    curl_setopt($ch, CURLOPT_URL, $url);
-    curl_setopt($ch, CURLOPT_POST, true);
-    curl_setopt($ch, CURLOPT_POSTFIELDS, $post_data);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 120); // Increased timeout for large files
-    curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_USERAGENT, 'StudyOrganizer/1.0');
-    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
-
-    $response = curl_exec($ch);
-    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    $curl_error = curl_error($ch);
-    $curl_info = curl_getinfo($ch);
-    curl_close($ch);
-
-    // Enhanced logging
-    error_log("OCR API Request - File: " . basename($file_path) . ", Size: " . $file_size . " bytes");
-    error_log("OCR API Response Code: " . $http_code);
-    error_log("OCR API Response Preview: " . substr($response, 0, 200));
-
-    if ($curl_error) {
-        error_log("OCR CURL Error: " . $curl_error);
-        return ['error' => 'Network error: ' . $curl_error, 'text' => false, 'debug' => 'CURL failed'];
-    }
-
-    if ($http_code === 200 && !empty($response)) {
-        $result = json_decode($response, true);
-
-        if (json_last_error() !== JSON_ERROR_NONE) {
-            error_log("OCR JSON decode error: " . json_last_error_msg());
-            return ['error' => 'Invalid response format', 'text' => false, 'debug' => 'JSON parsing failed'];
+    try {
+        // Read and encode the file
+        $file_content = file_get_contents($file_path);
+        if ($file_content === false) {
+            error_log("Failed to read file content: " . $file_path);
+            return ['error' => 'Failed to read file', 'text' => false, 'debug' => 'File read error'];
         }
 
-        // Check for API errors
-        if (isset($result['IsErroredOnProcessing']) && $result['IsErroredOnProcessing'] === true) {
-            $error_msg = isset($result['ErrorMessage']) ? $result['ErrorMessage'][0] : 'Unknown OCR processing error';
-            error_log("OCR Processing Error: " . $error_msg);
-            return ['error' => 'OCR processing failed: ' . $error_msg, 'text' => false, 'debug' => 'API processing error'];
+        $base64_content = base64_encode($file_content);
+
+        // Prepare the request payload for Google Vision API
+        $request_data = [
+            'requests' => [
+                [
+                    'image' => [
+                        'content' => $base64_content
+                    ],
+                    'features' => [
+                        [
+                            'type' => 'TEXT_DETECTION',
+                            'maxResults' => 50
+                        ],
+                        [
+                            'type' => 'DOCUMENT_TEXT_DETECTION',
+                            'maxResults' => 50
+                        ]
+                    ],
+                    'imageContext' => [
+                        'languageHints' => ['en', 'th'] // Support both English and Thai
+                    ]
+                ]
+            ]
+        ];
+
+        $url = GOOGLE_VISION_API_URL . '?key=' . $api_key;
+
+        // Enhanced logging
+        error_log("Google Vision OCR Request - File: " . basename($file_path) . ", Size: " . $file_size . " bytes");
+
+        // Make the API request
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $url);
+        curl_setopt($ch, CURLOPT_POST, true);
+        curl_setopt($ch, CURLOPT_HTTPHEADER, [
+            'Content-Type: application/json',
+            'User-Agent: StudyOrganizer/1.0'
+        ]);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($request_data));
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 120);
+        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 30);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, true);
+        curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_MAXREDIRS, 3);
+
+        $response = curl_exec($ch);
+        $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curl_error = curl_error($ch);
+        curl_close($ch);
+
+        error_log("Google Vision API Response Code: " . $http_code);
+        error_log("Google Vision API Response Preview: " . substr($response, 0, 200));
+
+        if ($curl_error) {
+            error_log("Google Vision CURL Error: " . $curl_error);
+            return ['error' => 'Network error: ' . $curl_error, 'text' => false, 'debug' => 'CURL failed'];
         }
 
-        if (isset($result['ParsedResults']) && !empty($result['ParsedResults'])) {
-            $extracted_text = '';
-            $total_confidence = 0;
-            $confidence_count = 0;
+        if ($http_code === 200 && !empty($response)) {
+            $result = json_decode($response, true);
 
-            foreach ($result['ParsedResults'] as $parsed_result) {
-                if (isset($parsed_result['ParsedText'])) {
-                    $extracted_text .= $parsed_result['ParsedText'] . "\n";
-
-                    // Track OCR confidence if available
-                    if (isset($parsed_result['TextOverlay']['Lines'])) {
-                        foreach ($parsed_result['TextOverlay']['Lines'] as $line) {
-                            if (isset($line['Words'])) {
-                                foreach ($line['Words'] as $word) {
-                                    if (isset($word['Height']) && $word['Height'] > 0) {
-                                        $confidence_count++;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+            if (json_last_error() !== JSON_ERROR_NONE) {
+                error_log("Google Vision JSON decode error: " . json_last_error_msg());
+                return ['error' => 'Invalid response format', 'text' => false, 'debug' => 'JSON parsing failed'];
             }
 
-            $final_text = trim($extracted_text);
+            // Check for API errors
+            if (isset($result['error'])) {
+                $error_msg = $result['error']['message'] ?? 'Unknown Google Vision API error';
+                error_log("Google Vision API Error: " . $error_msg);
+                return ['error' => 'Google Vision API error: ' . $error_msg, 'text' => false, 'debug' => 'API error response'];
+            }
 
-            if (!empty($final_text)) {
-                $word_count = str_word_count($final_text);
-                error_log("OCR Success - Extracted {$word_count} words");
+            // Extract text from the response
+            $extracted_text = '';
 
-                return [
-                    'error' => null,
-                    'text' => $final_text,
-                    'debug' => "OCR successful - {$word_count} words extracted"
-                ];
+            if (isset($result['responses']) && !empty($result['responses'])) {
+                $response_data = $result['responses'][0];
+
+                // Try DOCUMENT_TEXT_DETECTION first (better for structured documents)
+                if (isset($response_data['fullTextAnnotation']['text'])) {
+                    $extracted_text = $response_data['fullTextAnnotation']['text'];
+                    error_log("Google Vision: Using DOCUMENT_TEXT_DETECTION");
+                }
+                // Fallback to TEXT_DETECTION
+                elseif (isset($response_data['textAnnotations']) && !empty($response_data['textAnnotations'])) {
+                    $extracted_text = $response_data['textAnnotations'][0]['description'] ?? '';
+                    error_log("Google Vision: Using TEXT_DETECTION");
+                }
+
+                // Clean up the extracted text
+                $extracted_text = trim($extracted_text);
+
+                if (!empty($extracted_text)) {
+                    $word_count = str_word_count($extracted_text);
+                    $char_count = mb_strlen($extracted_text, 'UTF-8');
+                    error_log("Google Vision OCR Success - Extracted {$word_count} words, {$char_count} characters");
+
+                    return [
+                        'error' => null,
+                        'text' => $extracted_text,
+                        'debug' => "Google Vision OCR successful - {$word_count} words, {$char_count} characters extracted"
+                    ];
+                } else {
+                    error_log("Google Vision returned empty text");
+                    return ['error' => 'No text found in document', 'text' => false, 'debug' => 'Empty OCR result'];
+                }
             } else {
-                error_log("OCR returned empty text");
-                return ['error' => 'No text found in document', 'text' => false, 'debug' => 'Empty OCR result'];
+                error_log("Google Vision: No text annotations in response");
+                return ['error' => 'No text content detected', 'text' => false, 'debug' => 'No text annotations'];
             }
         } else {
-            error_log("OCR No parsed results in response");
-            return ['error' => 'No text content detected', 'text' => false, 'debug' => 'No parsed results'];
-        }
-    } else {
-        // Handle specific HTTP error codes
-        $error_message = "HTTP Error $http_code";
-        switch ($http_code) {
-            case 401:
-                $error_message = "Invalid API key";
-                break;
-            case 403:
-                $error_message = "API key limit exceeded or permission denied";
-                break;
-            case 422:
-                $error_message = "Invalid file format or corrupted file";
-                break;
-            case 500:
-                $error_message = "OCR service temporary error";
-                break;
-            case 503:
-                $error_message = "OCR service unavailable";
-                break;
-        }
+            // Handle specific HTTP error codes
+            $error_message = "HTTP Error $http_code";
+            switch ($http_code) {
+                case 400:
+                    $error_message = "Bad request - Invalid image or request format";
+                    break;
+                case 401:
+                    $error_message = "Invalid API key or authentication failed";
+                    break;
+                case 403:
+                    $error_message = "API key limit exceeded or permission denied";
+                    break;
+                case 429:
+                    $error_message = "Rate limit exceeded";
+                    break;
+                case 500:
+                    $error_message = "Google Vision service temporary error";
+                    break;
+                case 503:
+                    $error_message = "Google Vision service unavailable";
+                    break;
+            }
 
-        error_log("OCR HTTP Error: $http_code - $error_message");
-        return ['error' => $error_message, 'text' => false, 'debug' => "HTTP $http_code"];
+            error_log("Google Vision HTTP Error: $http_code - $error_message");
+            return ['error' => $error_message, 'text' => false, 'debug' => "HTTP $http_code"];
+        }
+    } catch (Exception $e) {
+        error_log("Google Vision OCR Exception: " . $e->getMessage());
+        return ['error' => 'OCR processing exception: ' . $e->getMessage(), 'text' => false, 'debug' => 'Exception occurred'];
     }
 }
 
@@ -349,7 +576,7 @@ function extractTextFromPDF($file_path)
     return $content ? trim($content) : false;
 }
 
-// Analyze with Claude - Enhanced with retry mechanism for overload handling
+// UPDATED: Analyze with Claude - Enhanced with multilingual language detection
 function analyzeWithClaude($text_content, $filename)
 {
     $api_key = CLAUDE_API_KEY;
@@ -357,8 +584,9 @@ function analyzeWithClaude($text_content, $filename)
     if (empty($api_key)) {
         return [
             'subject' => 'Others',
-            'summary' => 'Claude API key not configured',
-            'debug' => 'API key missing'
+            'summary' => 'AI API key not configured',
+            'debug' => 'API key missing',
+            'language' => 'en'
         ];
     }
 
@@ -366,7 +594,8 @@ function analyzeWithClaude($text_content, $filename)
         return [
             'subject' => 'Others',
             'summary' => 'No text content to analyze',
-            'debug' => 'Empty text content'
+            'debug' => 'Empty text content',
+            'language' => 'en'
         ];
     }
 
@@ -374,45 +603,61 @@ function analyzeWithClaude($text_content, $filename)
     $max_length = 15000; // Reasonable limit for Claude API
     if (strlen($text_content) > $max_length) {
         $text_content = substr($text_content, 0, $max_length) . "\n[Content truncated for analysis...]";
-        error_log("Text content truncated to $max_length characters for Claude analysis");
+        error_log("Text content truncated to $max_length characters for AI analysis");
     }
 
     $url = "https://api.anthropic.com/v1/messages";
 
-    // Enhanced prompt for better analysis
-    $prompt = "Please analyze the following educational document and provide a comprehensive analysis:
+    // Enhanced prompt with detailed summary structure, bullet points, and keywords
+    $prompt = "Please analyze the following educational document. First detect the primary language of the content, then provide a comprehensive structured analysis in that same language.
 
 **Document:** $filename
 **Content:** 
 $text_content
 
 **Instructions:**
-1. **Subject Classification:** Choose the most appropriate category from: Physics, Biology, Chemistry, Mathematics, Others
-2. **Detailed Summary:** Provide a comprehensive summary (3-5 sentences) that includes:
-   - Main topic and scope of the document
-   - Key concepts, theories, or principles discussed
-   - Important findings, formulas, or conclusions
-   - Educational level and context (if identifiable)
-   - Practical applications or examples mentioned
+1. **Language Detection**: Determine if the content is primarily in Thai (ภาษาไทย) or English
+2. **Subject Classification**: Choose the most appropriate category from: Physics, Biology, Chemistry, Mathematics, Others
+3. **Detailed Structured Summary**: Create a comprehensive analysis with multiple components
 
 **Analysis Guidelines:**
 - Focus on educational value and learning objectives
-- Identify specific subtopics within the subject area
-- Highlight any diagrams, equations, or data mentioned
-- Note any experimental procedures or problem-solving methods
-- Consider interdisciplinary connections if present
+- Extract specific subtopics, concepts, and terminology
+- Identify equations, formulas, diagrams, or data mentioned
+- Note experimental procedures, problem-solving methods, or case studies
+- Highlight key terms, definitions, and important concepts
+- Consider practical applications and real-world connections
+- Identify difficulty level and target audience
 
 **Response Format (JSON only):**
+If the content is primarily in Thai, respond like this:
 {
-    \"subject\": \"[Subject Category]\",
-    \"summary\": \"[Detailed summary with key insights and educational value]\"
+    \"language\": \"th\",
+    \"subject\": \"[Subject Category in English]\",
+    \"summary\": \"[หัวข้อหลัก]: สรุปเนื้อหาหลักของเอกสาร (2-3 ประโยค)\\n\\n[แนวคิดสำคัญ]:\\n• แนวคิดที่ 1: คำอธิบายสั้นๆ\\n• แนวคิดที่ 2: คำอธิบายสั้นๆ\\n• แนวคิดที่ 3: คำอธิบายสั้นๆ\\n\\n[คำศัพท์สำคัญ]: คำศัพท์1, คำศัพท์2, คำศัพท์3, คำศัพท์4\\n\\n[การประยุกต์ใช้]: อธิบายการนำไปใช้จริงหรือความสำคัญทางการศึกษา\",
+    \"summary_en\": \"[Brief English summary for reference]\"
 }
 
-Ensure the summary is informative, well-structured, and captures the essential learning content of the document.";
+If the content is primarily in English, respond like this:
+{
+    \"language\": \"en\",
+    \"subject\": \"[Subject Category]\",
+    \"summary\": \"[Main Topic]: Brief overview of the document's primary focus (2-3 sentences)\\n\\n[Key Concepts]:\\n• Concept 1: Brief explanation\\n• Concept 2: Brief explanation\\n• Concept 3: Brief explanation\\n\\n[Important Keywords]: keyword1, keyword2, keyword3, keyword4\\n\\n[Applications/Significance]: Practical applications or educational importance\",
+    \"summary_th\": \"[สรุปสั้นๆ เป็นภาษาไทยเพื่ออ้างอิง]\"
+}
+
+**Important Notes**: 
+- Always provide the summary in the primary language of the source content
+- Use bullet points (•) for key concepts to improve readability
+- Include 3-5 key concepts maximum
+- Extract 4-6 most important keywords/terms
+- Subject category should always be in English for consistency
+- Keep each bullet point concise but informative (10-15 words max)
+- Focus on educational content that would help students understand the material";
 
     $request_data = [
         'model' => 'claude-3-5-sonnet-20241022',
-        'max_tokens' => 500,
+        'max_tokens' => 800, // Increased for multilingual responses
         'messages' => [
             [
                 'role' => 'user',
@@ -426,7 +671,7 @@ Ensure the summary is informative, well-structured, and captures the essential l
     $base_delay = 2; // seconds
 
     for ($attempt = 1; $attempt <= $max_retries; $attempt++) {
-        error_log("Claude API attempt $attempt of $max_retries for file: $filename");
+        error_log("AI API attempt $attempt of $max_retries for file: $filename");
 
         $ch = curl_init();
         curl_setopt($ch, CURLOPT_URL, $url);
@@ -448,15 +693,16 @@ Ensure the summary is informative, well-structured, and captures the essential l
         $curl_error = curl_error($ch);
         curl_close($ch);
 
-        error_log("Claude API attempt $attempt - HTTP Code: $http_code");
+        error_log("AI API attempt $attempt - HTTP Code: $http_code");
 
         if ($curl_error) {
-            error_log("Claude CURL Error on attempt $attempt: " . $curl_error);
+            error_log("AI CURL Error on attempt $attempt: " . $curl_error);
             if ($attempt === $max_retries) {
                 return [
                     'subject' => 'Others',
-                    'summary' => 'Network error connecting to Claude API after ' . $max_retries . ' attempts: ' . $curl_error,
-                    'debug' => 'CURL Error after retries: ' . $curl_error
+                    'summary' => 'Network error connecting to AI API after ' . $max_retries . ' attempts: ' . $curl_error,
+                    'debug' => 'CURL Error after retries: ' . $curl_error,
+                    'language' => 'en'
                 ];
             }
             // Wait before retry
@@ -481,20 +727,39 @@ Ensure the summary is informative, well-structured, and captures the essential l
                             $analysis['subject'] = 'Others';
                         }
 
-                        error_log("Claude analysis successful on attempt $attempt");
+                        // Get detected language (default to English if not specified)
+                        $detected_language = isset($analysis['language']) ? $analysis['language'] : 'en';
+
+                        // Prepare the main summary and alternative language summary
+                        $main_summary = $analysis['summary'];
+                        $alt_summary = '';
+
+                        if ($detected_language === 'th' && isset($analysis['summary_en'])) {
+                            $alt_summary = $analysis['summary_en'];
+                        } elseif ($detected_language === 'en' && isset($analysis['summary_th'])) {
+                            $alt_summary = $analysis['summary_th'];
+                        }
+
+                        error_log("AI analysis successful on attempt $attempt - Language: $detected_language");
                         return [
                             'subject' => $analysis['subject'],
-                            'summary' => $analysis['summary'],
-                            'debug' => "Claude analysis successful on attempt $attempt - Enhanced summary generated"
+                            'summary' => $main_summary,
+                            'summary_alt' => $alt_summary,
+                            'language' => $detected_language,
+                            'debug' => "AI analysis successful on attempt $attempt - Enhanced multilingual summary generated"
                         ];
                     }
                 }
 
-                // Fallback parsing method
+                // Enhanced fallback parsing method with structured content support
+                $detected_language = detectLanguageFromContent($text_content);
                 $lines = explode("\n", $claude_response);
                 $subject = 'Others';
-                $summary = 'Document analyzed successfully. The content has been processed and categorized.';
+                $summary = ($detected_language === 'th')
+                    ? '[หัวข้อหลัก]: เอกสารได้รับการวิเคราะห์เรียบร้อยแล้ว\n\n[แนวคิดสำคัญ]:\n• เนื้อหาได้รับการประมวลผลและจัดหมวดหมู่แล้ว\n• ระบบ AI ได้ทำการวิเคราะห์เอกสารเรียบร้อย\n\n[คำศัพท์สำคัญ]: วิเคราะห์, จัดหมวดหมู่, เอกสาร\n\n[การประยุกต์ใช้]: เอกสารพร้อมสำหรับการศึกษาและอ้างอิง'
+                    : '[Main Topic]: Document analyzed successfully\n\n[Key Concepts]:\n• Content has been processed and categorized\n• AI analysis completed successfully\n• Document ready for educational use\n\n[Important Keywords]: analysis, categorization, document, education\n\n[Applications/Significance]: Document is ready for study and reference purposes';
 
+                // Try to extract subject and summary from fallback response
                 foreach ($lines as $line) {
                     if (stripos($line, 'subject') !== false && stripos($line, ':') !== false) {
                         $parts = explode(':', $line, 2);
@@ -509,8 +774,18 @@ Ensure the summary is informative, well-structured, and captures the essential l
                     if (stripos($line, 'summary') !== false && stripos($line, ':') !== false) {
                         $parts = explode(':', $line, 2);
                         if (count($parts) > 1) {
-                            $summary = trim(str_replace(['"', "'", '}'], '', $parts[1]));
-                            if (strlen($summary) > 10) { // Only use if we got a meaningful summary
+                            $extracted_summary = trim(str_replace(['"', "'", '}'], '', $parts[1]));
+                            if (strlen($extracted_summary) > 20) { // Only use if we got a meaningful summary
+                                // Try to structure the extracted summary
+                                if (!strpos($extracted_summary, '[') && !strpos($extracted_summary, '•')) {
+                                    // Convert plain text to structured format
+                                    $structured_summary = ($detected_language === 'th')
+                                        ? "[หัวข้อหลัก]: $extracted_summary\n\n[แนวคิดสำคัญ]:\n• ข้อมูลหลักจากการวิเคราะห์\n• เนื้อหาที่สำคัญของเอกสาร\n\n[คำศัพท์สำคัญ]: การศึกษา, เอกสาร, ข้อมูล\n\n[การประยุกต์ใช้]: นำไปใช้ในการศึกษาและอ้างอิง"
+                                        : "[Main Topic]: $extracted_summary\n\n[Key Concepts]:\n• Primary information from analysis\n• Important content from document\n\n[Important Keywords]: education, document, information\n\n[Applications/Significance]: Useful for study and reference";
+                                    $summary = $structured_summary;
+                                } else {
+                                    $summary = $extracted_summary;
+                                }
                                 break;
                             }
                         }
@@ -520,7 +795,8 @@ Ensure the summary is informative, well-structured, and captures the essential l
                 return [
                     'subject' => $subject,
                     'summary' => $summary,
-                    'debug' => "Claude response parsed with fallback method on attempt $attempt"
+                    'language' => $detected_language,
+                    'debug' => "AI response parsed with fallback method on attempt $attempt"
                 ];
             }
         }
@@ -534,7 +810,7 @@ Ensure the summary is informative, well-structured, and captures the essential l
                 $error_message = $error_response['error']['message'];
             }
 
-            error_log("Claude API retryable error on attempt $attempt: HTTP $http_code - $error_message");
+            error_log("AI API retryable error on attempt $attempt: HTTP $http_code - $error_message");
 
             if ($attempt < $max_retries) {
                 // Exponential backoff: wait longer for each retry
@@ -543,10 +819,16 @@ Ensure the summary is informative, well-structured, and captures the essential l
                 sleep($wait_time);
                 continue;
             } else {
-                // Final attempt failed
+                // Final attempt failed - provide message in appropriate language
+                $detected_language = detectLanguageFromContent($text_content);
+                $error_summary = ($detected_language === 'th')
+                    ? "อัพโหลดเอกสารเรียบร้อยแล้ว AI กำลังใช้งานหนัก (HTTP $http_code) เอกสารได้รับการบันทึกแล้วและสามารถวิเคราะห์ใหม่ได้ในภายหลังเมื่อพร้อมใช้งาน"
+                    : "Document uploaded successfully. AI is temporarily overloaded (HTTP $http_code). The document has been saved and can be re-analyzed later when the service is available.";
+
                 return [
                     'subject' => 'Others',
-                    'summary' => "Document uploaded successfully. Claude AI is temporarily overloaded (HTTP $http_code). The document has been saved and can be re-analyzed later when the service is available.",
+                    'summary' => $error_summary,
+                    'language' => $detected_language,
                     'debug' => "HTTP $http_code after $max_retries attempts: $error_message"
                 ];
             }
@@ -561,93 +843,238 @@ Ensure the summary is informative, well-structured, and captures the essential l
                 $error_message = $error_response['error']['message'];
             }
 
-            error_log("Claude API non-retryable error: HTTP $http_code - $error_message");
+            error_log("AI API non-retryable error: HTTP $http_code - $error_message");
+
+            $detected_language = detectLanguageFromContent($text_content);
+            $error_summary = ($detected_language === 'th')
+                ? "อัพโหลดเอกสารเรียบร้อยแล้ว เกิดข้อผิดพลาด AI API (HTTP $http_code): $error_message"
+                : "Document uploaded successfully. AI API error (HTTP $http_code): $error_message";
 
             return [
                 'subject' => 'Others',
-                'summary' => "Document uploaded successfully. Claude API error (HTTP $http_code): $error_message",
+                'summary' => $error_summary,
+                'language' => $detected_language,
                 'debug' => "HTTP $http_code (non-retryable): $error_message"
             ];
         }
     }
 
     // Should not reach here, but just in case
+    $detected_language = detectLanguageFromContent($text_content);
+    $fallback_summary = ($detected_language === 'th')
+        ? 'อัพโหลดเอกสารเรียบร้อยแล้ว แต่การวิเคราะห์ AI ล้มเหลวหลังจากการพยายามหลายครั้ง'
+        : 'Document uploaded successfully but AI analysis failed after multiple attempts.';
+
     return [
         'subject' => 'Others',
-        'summary' => 'Document uploaded successfully but AI analysis failed after multiple attempts.',
+        'summary' => $fallback_summary,
+        'language' => $detected_language,
         'debug' => 'All retry attempts exhausted'
     ];
 }
 
-// Process uploaded file
+// UPDATED: Process uploaded file with enhanced debugging and error handling
 function processUploadedFile($uploaded_file)
 {
+    $debug_info = [];
+    $debug_info['function_start'] = 'processUploadedFile started';
+
     $file_extension = strtolower(pathinfo($uploaded_file['name'], PATHINFO_EXTENSION));
     $user_id = $_SESSION['user_id'];
+    $debug_info['file_extension'] = $file_extension;
+    $debug_info['user_id'] = $user_id;
 
     $clean_filename = preg_replace('/[^a-zA-Z0-9._-]/', '_', $uploaded_file['name']);
     $timestamp = time();
     $final_filename = $timestamp . '_' . $clean_filename;
 
     $temp_upload_path = UPLOAD_DIR . 'temp_' . $final_filename;
+    $debug_info['temp_path'] = $temp_upload_path;
 
-    if (move_uploaded_file($uploaded_file['tmp_name'], $temp_upload_path)) {
-        $extracted_text = '';
+    if (!move_uploaded_file($uploaded_file['tmp_name'], $temp_upload_path)) {
+        $debug_info['error'] = 'Failed to move uploaded file';
+        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+        return [
+            'subject' => 'Others',
+            'summary' => 'Failed to move uploaded file to temporary location',
+            'language' => 'en',
+            'status' => 'error',
+            'debug' => $debug_info
+        ];
+    }
 
-        if ($file_extension === 'pdf') {
-            $extracted_text = extractTextFromPDF($temp_upload_path);
-            if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
-                $ocr_result = performOCR($temp_upload_path);
-                $extracted_text = $ocr_result['text'];
-            }
-        } elseif (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff'])) {
+    $debug_info['file_moved'] = 'File moved successfully to temp location';
+    $extracted_text = '';
+
+    // Text extraction phase
+    if ($file_extension === 'pdf') {
+        $debug_info['processing_type'] = 'PDF - trying pdftotext first';
+        $extracted_text = extractTextFromPDF($temp_upload_path);
+
+        if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
+            $debug_info['pdf_text_extraction'] = 'pdftotext failed or returned minimal text, trying OCR';
             $ocr_result = performOCR($temp_upload_path);
+            $debug_info['ocr_result'] = $ocr_result;
             $extracted_text = $ocr_result['text'];
+        } else {
+            $debug_info['pdf_text_extraction'] = 'pdftotext successful, extracted ' . strlen($extracted_text) . ' characters';
+        }
+    } elseif (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp'])) {
+        $debug_info['processing_type'] = 'Image - using OCR';
+        $ocr_result = performOCR($temp_upload_path);
+        $debug_info['ocr_result'] = $ocr_result;
+        $extracted_text = $ocr_result['text'];
+    } else {
+        $debug_info['error'] = 'Unsupported file type: ' . $file_extension;
+    }
+
+    $debug_info['extracted_text_length'] = $extracted_text ? strlen($extracted_text) : 0;
+    $debug_info['extracted_text_preview'] = $extracted_text ? substr($extracted_text, 0, 100) . '...' : 'No text extracted';
+
+    // Check if we have sufficient text for analysis
+    if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
+        $debug_info['error'] = 'Insufficient text extracted for analysis';
+        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+
+        // Clean up temp file
+        if (file_exists($temp_upload_path)) {
+            unlink($temp_upload_path);
         }
 
-        if ($extracted_text && strlen(trim($extracted_text)) > 10) {
-            $analysis = analyzeWithClaude($extracted_text, $uploaded_file['name']);
-            $subject = $analysis['subject'];
+        return [
+            'subject' => 'Others',
+            'summary' => 'Could not extract sufficient text from file. Please ensure the file contains readable text.',
+            'language' => 'en',
+            'status' => 'error',
+            'debug' => $debug_info
+        ];
+    }
 
-            $subject_upload_path = getUserUploadPath($user_id, $subject);
-            if (!file_exists($subject_upload_path)) {
-                mkdir($subject_upload_path, 0755, true);
+    // AI Analysis phase
+    $debug_info['ai_analysis'] = 'Starting AI analysis with Claude';
+    try {
+        $analysis = analyzeWithClaude($extracted_text, $uploaded_file['name']);
+        $debug_info['ai_analysis_result'] = $analysis;
+    } catch (Exception $e) {
+        $debug_info['ai_error'] = 'AI analysis failed: ' . $e->getMessage();
+        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+
+        // Clean up temp file
+        if (file_exists($temp_upload_path)) {
+            unlink($temp_upload_path);
+        }
+
+        return [
+            'subject' => 'Others',
+            'summary' => 'AI analysis failed: ' . $e->getMessage(),
+            'language' => 'en',
+            'status' => 'error',
+            'debug' => $debug_info
+        ];
+    }
+
+    $subject = $analysis['subject'];
+    $language = isset($analysis['language']) ? $analysis['language'] : 'en';
+    $alt_summary = isset($analysis['summary_alt']) ? $analysis['summary_alt'] : '';
+
+    $debug_info['analysis_subject'] = $subject;
+    $debug_info['analysis_language'] = $language;
+
+    // File organization phase
+    $subject_upload_path = getUserUploadPath($user_id, $subject);
+    if (!file_exists($subject_upload_path)) {
+        if (!mkdir($subject_upload_path, 0755, true)) {
+            $debug_info['error'] = 'Failed to create subject directory: ' . $subject_upload_path;
+            $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+
+            // Clean up temp file
+            if (file_exists($temp_upload_path)) {
+                unlink($temp_upload_path);
             }
 
-            $final_upload_path = $subject_upload_path . $final_filename;
-
-            if (rename($temp_upload_path, $final_upload_path)) {
-                $summary_file_path = createSummaryTextFile(
-                    $analysis['summary'],
-                    $uploaded_file['name'],
-                    $user_id,
-                    $subject
-                );
-
-                saveFileToDatabase(
-                    $user_id,
-                    $uploaded_file['name'],
-                    $subject,
-                    $file_extension,
-                    $final_upload_path,
-                    $summary_file_path
-                );
-
-                return [
-                    'subject' => $subject,
-                    'summary' => $analysis['summary'],
-                    'status' => 'completed',
-                    'extracted_text' => substr($extracted_text, 0, 1000),
-                    'file_path' => $final_upload_path
-                ];
-            }
+            return [
+                'subject' => 'Others',
+                'summary' => 'Failed to create storage directory',
+                'language' => 'en',
+                'status' => 'error',
+                'debug' => $debug_info
+            ];
         }
     }
 
+    $final_upload_path = $subject_upload_path . $final_filename;
+    $debug_info['final_path'] = $final_upload_path;
+
+    if (!rename($temp_upload_path, $final_upload_path)) {
+        $debug_info['error'] = 'Failed to move file to final location';
+        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+
+        // Clean up temp file
+        if (file_exists($temp_upload_path)) {
+            unlink($temp_upload_path);
+        }
+
+        return [
+            'subject' => 'Others',
+            'summary' => 'Failed to move file to final storage location',
+            'language' => 'en',
+            'status' => 'error',
+            'debug' => $debug_info
+        ];
+    }
+
+    // Summary file creation
+    try {
+        $summary_file_path = createSummaryTextFile(
+            $analysis['summary'],
+            $uploaded_file['name'],
+            $user_id,
+            $subject,
+            $language,
+            $alt_summary
+        );
+        $debug_info['summary_file_path'] = $summary_file_path;
+    } catch (Exception $e) {
+        $debug_info['summary_error'] = 'Failed to create summary file: ' . $e->getMessage();
+        $summary_file_path = null;
+    }
+
+    // Database storage
+    try {
+        $db_result = saveFileToDatabase(
+            $user_id,
+            $uploaded_file['name'],
+            $subject,
+            $file_extension,
+            $final_upload_path,
+            $summary_file_path,
+            $language
+        );
+        $debug_info['database_save'] = $db_result ? 'SUCCESS' : 'FAILED';
+    } catch (Exception $e) {
+        $debug_info['database_error'] = 'Database save failed: ' . $e->getMessage();
+        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+
+        return [
+            'subject' => 'Others',
+            'summary' => 'File processed but failed to save to database: ' . $e->getMessage(),
+            'language' => 'en',
+            'status' => 'error',
+            'debug' => $debug_info
+        ];
+    }
+
+    $debug_info['success'] = 'File processed successfully';
+    $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+
     return [
-        'subject' => 'Others',
-        'summary' => 'Failed to process file',
-        'status' => 'error'
+        'subject' => $subject,
+        'summary' => $analysis['summary'],
+        'language' => $language,
+        'status' => 'completed',
+        'extracted_text' => substr($extracted_text, 0, 1000),
+        'file_path' => $final_upload_path,
+        'debug' => $debug_info
     ];
 }
 
@@ -701,6 +1128,9 @@ function serveOriginalFile($file_id, $user_id)
         header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
     } elseif ($file_extension === 'gif') {
         header('Content-Type: image/gif');
+        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
+    } elseif ($file_extension === 'webp') {
+        header('Content-Type: image/webp');
         header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
     } elseif (in_array($file_extension, ['bmp', 'tiff', 'tif'])) {
         header('Content-Type: image/' . $file_extension);
@@ -807,6 +1237,7 @@ function deleteUserFile($file_id, $user_id)
     return false;
 }
 
+// UPDATED: reanalyzeFile function to handle language detection with Google Vision
 function reanalyzeFile($file_id, $user_id)
 {
     $pdo = getDBConnection();
@@ -828,7 +1259,7 @@ function reanalyzeFile($file_id, $user_id)
             $ocr_result = performOCR($file['original_file_path']);
             $extracted_text = $ocr_result['text'];
         }
-    } else if (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff'])) {
+    } else if (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp'])) {
         $ocr_result = performOCR($file['original_file_path']);
         $extracted_text = $ocr_result['text'];
     }
@@ -836,11 +1267,44 @@ function reanalyzeFile($file_id, $user_id)
     if ($extracted_text && strlen(trim($extracted_text)) > 10) {
         $analysis = analyzeWithClaude($extracted_text, $file['file_name']);
         $new_subject = $analysis['subject'];
+        $new_language = isset($analysis['language']) ? $analysis['language'] : 'en';
+        $alt_summary = isset($analysis['summary_alt']) ? $analysis['summary_alt'] : '';
 
+        // Update summary file with new analysis
         if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-            file_put_contents($file['summary_file_path'], $analysis['summary']);
+            // Create new summary content with language info
+            $summary_content = $analysis['summary'];
+
+            // Add alternative language summary if available
+            if (!empty($alt_summary)) {
+                $separator = "\n\n" . str_repeat("-", 50) . "\n";
+                if ($new_language === 'th') {
+                    $summary_content .= $separator . "English Summary:\n" . $alt_summary;
+                } else {
+                    $summary_content .= $separator . "สรุปภาษาไทย:\n" . $alt_summary;
+                }
+            }
+
+            // Add language metadata
+            $summary_content .= "\n\n" . str_repeat("=", 50) . "\n";
+            $summary_content .= "Language: " . ($new_language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
+            $summary_content .= "Re-analyzed: " . date('Y-m-d H:i:s') . "\n";
+
+            file_put_contents($file['summary_file_path'], $summary_content);
         }
 
+        // Update database with new language info
+        try {
+            // Check if language column exists
+            $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
+            if ($check_column->rowCount() == 0) {
+                $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
+            }
+        } catch (Exception $e) {
+            error_log("Error checking/adding language column: " . $e->getMessage());
+        }
+
+        // If subject changed, move file to new subject folder
         if ($new_subject !== $file['subject']) {
             $new_subject_path = getUserUploadPath($user_id, $new_subject);
             if (!file_exists($new_subject_path)) {
@@ -849,10 +1313,15 @@ function reanalyzeFile($file_id, $user_id)
 
             $new_file_path = $new_subject_path . basename($file['original_file_path']);
             if (rename($file['original_file_path'], $new_file_path)) {
-                $update_sql = "UPDATE user_files SET subject = ?, original_file_path = ? WHERE id = ?";
+                $update_sql = "UPDATE user_files SET subject = ?, original_file_path = ?, language = ? WHERE id = ?";
                 $update_stmt = $pdo->prepare($update_sql);
-                $update_stmt->execute([$new_subject, $new_file_path, $file_id]);
+                $update_stmt->execute([$new_subject, $new_file_path, $new_language, $file_id]);
             }
+        } else {
+            // Just update the language
+            $update_sql = "UPDATE user_files SET language = ? WHERE id = ?";
+            $update_stmt = $pdo->prepare($update_sql);
+            $update_stmt->execute([$new_language, $file_id]);
         }
 
         return true;
@@ -871,16 +1340,42 @@ if (isset($_SESSION['user_id'])) {
     createUserFolderStructure($_SESSION['user_id']);
 }
 
-// Handle file upload
+// Handle file upload with enhanced error handling and debugging
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['uploaded_file'])) {
     $uploaded_file = $_FILES['uploaded_file'];
 
+    // Add debug session variable to show processing status
+    $_SESSION['last_upload_debug'] = [];
+    $_SESSION['last_upload_debug']['timestamp'] = date('Y-m-d H:i:s');
+    $_SESSION['last_upload_debug']['filename'] = $uploaded_file['name'];
+
     if ($uploaded_file['error'] === UPLOAD_ERR_OK) {
-        $processing_result = processUploadedFile($uploaded_file);
-        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($_GET));
+        $_SESSION['last_upload_debug']['upload_status'] = 'File uploaded successfully';
+
+        try {
+            $processing_result = processUploadedFile($uploaded_file);
+            $_SESSION['last_upload_debug']['processing_result'] = $processing_result;
+
+            if ($processing_result['status'] === 'completed') {
+                $_SESSION['last_upload_debug']['final_status'] = 'SUCCESS: File processed and saved';
+            } else {
+                $_SESSION['last_upload_debug']['final_status'] = 'ERROR: Processing failed - ' . $processing_result['summary'];
+            }
+        } catch (Exception $e) {
+            $_SESSION['last_upload_debug']['final_status'] = 'EXCEPTION: ' . $e->getMessage();
+            error_log("File processing exception: " . $e->getMessage());
+        }
+
+        // Redirect with debug parameter
+        $redirect_params = $_GET;
+        $redirect_params['debug'] = '1';
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($redirect_params));
         exit();
     } else {
-        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($_GET));
+        $_SESSION['last_upload_debug']['upload_status'] = 'Upload failed with error: ' . $uploaded_file['error'];
+        $redirect_params = $_GET;
+        $redirect_params['debug'] = '1';
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($redirect_params));
         exit();
     }
 }
@@ -1310,6 +1805,80 @@ function getSubjectIcon($subject)
             -webkit-text-fill-color: transparent;
             background-clip: text;
         }
+
+        /* Settings Modal Animation */
+        #settingsModal {
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+        }
+
+        #settingsModal:not(.hidden) {
+            opacity: 1;
+        }
+
+        /* Progress bar animation */
+        @keyframes progressPulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+
+        .animate-pulse {
+            animation: progressPulse 2s infinite;
+        }
+
+        /* Hover effects for feature cards */
+        .glass-card:hover {
+            transform: translateY(-1px);
+            transition: transform 0.2s ease-in-out;
+        }
+
+        /* Mobile responsiveness for settings */
+        @media (max-width: 640px) {
+            #settingsModal .glass-card {
+                margin: 1rem;
+                max-width: calc(100vw - 2rem);
+            }
+        }
+
+        .sidebar .border-t.border-theme-medium {
+            position: relative;
+        }
+
+        .sidebar .border-t.border-theme-medium::before {
+            content: '';
+            position: absolute;
+            top: -1px;
+            left: 1rem;
+            right: 1rem;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--color-accent-light), transparent);
+            opacity: 0.3;
+        }
+
+        /* Ensure settings button has proper hover state */
+        #settingsBtn:hover {
+            background-color: var(--color-primary-medium);
+            transform: translateX(2px);
+            transition: all 0.2s ease;
+        }
+
+        /* Mobile responsiveness for sidebar footer */
+        @media (max-width: 640px) {
+            .sidebar .space-y-1 {
+                space-y: 0.25rem;
+            }
+
+            .sidebar .btn-touch {
+                min-height: 44px;
+            }
+        }
     </style>
 </head>
 
@@ -1374,10 +1943,19 @@ function getSubjectIcon($subject)
 
             <!-- Footer with Logout -->
             <div class="px-2 sm:px-4 py-3 sm:py-4 border-t border-theme-medium">
-                <a href="?action=logout" class="w-full flex items-center px-3 sm:px-4 py-2 text-xs sm:text-sm text-red-400 hover:bg-theme-medium rounded-lg transition-colors btn-touch">
-                    <span class="text-base sm:text-lg mr-2 sm:mr-3">🚪</span>
-                    <span>Logout</span>
-                </a>
+                <div class="space-y-1">
+                    <!-- Settings Button -->
+                    <button id="settingsBtn" onclick="openSettingsPanel()" class="w-full flex items-center px-3 sm:px-4 py-2 text-xs sm:text-sm text-theme-light hover:bg-theme-medium rounded-lg transition-colors btn-touch focus:outline-none focus:ring-2 focus:ring-theme-green focus:ring-opacity-50">
+                        <span class="text-base sm:text-lg mr-2 sm:mr-3">⚙️</span>
+                        <span>Settings</span>
+                    </button>
+
+                    <!-- Logout Button -->
+                    <a href="?action=logout" class="w-full flex items-center px-3 sm:px-4 py-2 text-xs sm:text-sm text-red-400 hover:bg-theme-medium rounded-lg transition-colors btn-touch">
+                        <span class="text-base sm:text-lg mr-2 sm:mr-3">🚪</span>
+                        <span>Logout</span>
+                    </a>
+                </div>
             </div>
         </div>
 
@@ -1412,14 +1990,62 @@ function getSubjectIcon($subject)
                     </div>
                 </div>
                 <div class="flex items-center space-x-2 sm:space-x-4">
-                    <button class="px-2 sm:px-4 py-2 bg-theme-light hover:bg-theme-green text-white rounded-lg transition-colors hidden sm:block btn-touch">
-                        <span class="text-sm sm:text-base">⚙️ Settings</span>
-                    </button>
+                    <!-- You can add other action buttons here if needed in the future -->
                 </div>
             </div>
 
             <!-- Content Area -->
             <div class="flex-1 overflow-auto custom-scrollbar content-padding print-full-width">
+                <?php
+                // Debug information display
+                if (isset($_GET['debug']) && isset($_SESSION['last_upload_debug'])):
+                ?>
+                    <div class="mb-6 bg-yellow-900 bg-opacity-50 border border-yellow-600 rounded-lg p-4">
+                        <h3 class="text-yellow-200 font-semibold mb-3 flex items-center">
+                            <span class="mr-2">🐛</span>Debug Information - Last Upload
+                            <button onclick="this.parentElement.parentElement.style.display='none'" class="ml-auto text-yellow-400 hover:text-yellow-200">✕</button>
+                        </h3>
+
+                        <div class="space-y-3 text-sm">
+                            <div class="bg-black bg-opacity-30 rounded p-3">
+                                <h4 class="text-yellow-300 font-medium mb-2">📋 Basic Info:</h4>
+                                <p class="text-yellow-100">File: <?php echo htmlspecialchars($_SESSION['last_upload_debug']['filename'] ?? 'Unknown'); ?></p>
+                                <p class="text-yellow-100">Time: <?php echo htmlspecialchars($_SESSION['last_upload_debug']['timestamp'] ?? 'Unknown'); ?></p>
+                                <p class="text-yellow-100">Status: <?php echo htmlspecialchars($_SESSION['last_upload_debug']['final_status'] ?? 'Unknown'); ?></p>
+                            </div>
+
+                            <?php if (isset($_SESSION['last_upload_debug']['processing_details'])): ?>
+                                <div class="bg-black bg-opacity-30 rounded p-3">
+                                    <h4 class="text-yellow-300 font-medium mb-2">🔍 Processing Details:</h4>
+                                    <pre class="text-yellow-100 text-xs overflow-auto max-h-40"><?php echo htmlspecialchars(print_r($_SESSION['last_upload_debug']['processing_details'], true)); ?></pre>
+                                </div>
+                            <?php endif; ?>
+
+                            <div class="bg-black bg-opacity-30 rounded p-3">
+                                <h4 class="text-yellow-300 font-medium mb-2">🔧 Configuration Check:</h4>
+                                <p class="text-yellow-100">Google Vision API Key: <?php echo (GOOGLE_VISION_API_KEY === 'YOUR_GOOGLE_VISION_API_KEY_HERE') ? '❌ NOT CONFIGURED' : '✅ Configured'; ?></p>
+                                <p class="text-yellow-100">Claude API Key: <?php echo (empty(CLAUDE_API_KEY)) ? '❌ NOT CONFIGURED' : '✅ Configured'; ?></p>
+                                <p class="text-yellow-100">Upload Directory: <?php echo is_writable(UPLOAD_DIR) ? '✅ Writable' : '❌ Not Writable'; ?></p>
+                                <p class="text-yellow-100">PHP Upload Max: <?php echo ini_get('upload_max_filesize'); ?></p>
+                                <p class="text-yellow-100">PHP Post Max: <?php echo ini_get('post_max_size'); ?></p>
+                            </div>
+
+                            <?php if (GOOGLE_VISION_API_KEY === 'YOUR_GOOGLE_VISION_API_KEY_HERE'): ?>
+                                <div class="bg-red-900 bg-opacity-50 border border-red-600 rounded p-3">
+                                    <h4 class="text-red-300 font-medium mb-2">⚠️ Configuration Issue:</h4>
+                                    <p class="text-red-200 text-sm">Google Vision API key is not configured. Please:</p>
+                                    <ol class="text-red-200 text-sm mt-2 ml-4 list-decimal">
+                                        <li>Go to <a href="https://console.cloud.google.com/" target="_blank" class="text-blue-300 underline">Google Cloud Console</a></li>
+                                        <li>Enable the "Cloud Vision API"</li>
+                                        <li>Create an API key</li>
+                                        <li>Replace 'YOUR_GOOGLE_VISION_API_KEY_HERE' in the code with your actual API key</li>
+                                    </ol>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                <?php endif; ?>
+
                 <?php if ($active_tab === 'dashboard'): ?>
                     <!-- Dashboard View -->
                     <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 sm:gap-6 lg:gap-8">
@@ -1444,18 +2070,25 @@ function getSubjectIcon($subject)
                                     </form>
                                     <form method="post" enctype="multipart/form-data">
                                         <label class="cursor-pointer block">
-                                            <input type="file" name="uploaded_file" accept="image/*" class="hidden" />
+                                            <input type="file" name="uploaded_file" accept="image/*,.webp" class="hidden" />
                                             <div class="upload-area glass-card rounded-lg sm:rounded-xl p-4 sm:p-6 text-center hover:shadow-lg transition-all duration-300 border-2 border-dashed border-theme-bright hover:border-theme-green btn-touch">
                                                 <div class="text-theme-green text-2xl sm:text-4xl mb-2 sm:mb-3">🖼️</div>
                                                 <span class="text-base sm:text-lg font-medium text-white">Images</span>
-                                                <p class="text-xs sm:text-sm text-gray-300 mt-1 sm:mt-2">JPG, PNG, etc.</p>
+                                                <p class="text-xs sm:text-sm text-gray-300 mt-1 sm:mt-2">JPG, PNG, WebP, etc.</p>
                                             </div>
                                         </label>
                                     </form>
                                 </div>
                                 <div class="bg-theme-bright rounded-lg p-3 sm:p-4 border-l-4 border-theme-green">
-                                    <p class="text-black font-medium text-sm sm:text-base">💡 AI-Powered Organization</p>
-                                    <p class="text-black text-xs sm:text-sm mt-1">Files are automatically categorized by subject and summarized using advanced AI</p>
+                                    <div class="flex items-center justify-between">
+                                        <div class="flex-1">
+                                            <p class="text-black font-medium text-sm sm:text-base">🌏 AI-Powered with Google Vision OCR</p>
+                                            <p class="text-black text-xs sm:text-sm mt-1">Enhanced OCR accuracy with Google's advanced text recognition. AI generates detailed summaries with bullet points, key concepts, and important keywords in Thai or English.</p>
+                                        </div>
+                                        <button onclick="testAPIConfiguration()" class="ml-4 px-3 py-1 bg-theme-medium hover:bg-theme-dark text-white rounded text-xs font-medium btn-touch flex-shrink-0">
+                                            Test Setup
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
 
@@ -1473,7 +2106,7 @@ function getSubjectIcon($subject)
                                                 <span class="text-2xl sm:text-3xl font-bold text-theme-dark"><?php echo $subject['count']; ?></span>
                                             </div>
                                             <p class="font-semibold <?php echo in_array($subject['name'], ['Physics', 'Mathematics', 'Biology']) ? 'text-theme-dark' : 'text-white'; ?> text-base sm:text-lg"><?php echo htmlspecialchars($subject['name']); ?></p>
-                                            <p class="text-white text-opacity-80 text-sm sm:text-base">files stored</p>
+                                            <p class="text-theme-dark text-opacity-80 text-sm sm:text-base">files stored</p>
                                         </a>
                                     <?php endforeach; ?>
                                 </div>
@@ -1489,7 +2122,18 @@ function getSubjectIcon($subject)
                                         <div class="text-center py-6 sm:py-8">
                                             <div class="text-gray-400 text-3xl sm:text-4xl mb-2 sm:mb-3">📂</div>
                                             <p class="text-gray-300 text-sm sm:text-base">No files uploaded yet</p>
-                                            <p class="text-gray-400 text-xs sm:text-sm">Upload your first document to get started</p>
+                                            <p class="text-gray-400 text-xs sm:text-sm mb-4">Upload your first document to get started</p>
+
+                                            <!-- Quick troubleshooting -->
+                                            <div class="bg-blue-900 bg-opacity-30 rounded-lg p-4 mt-4 text-left">
+                                                <h5 class="text-blue-300 font-medium mb-2 text-center">📋 First time? Here's what to do:</h5>
+                                                <div class="text-blue-200 text-xs space-y-1">
+                                                    <p>1. Click "Test Setup" button above to verify your configuration</p>
+                                                    <p>2. If setup is complete, try uploading a PDF or image</p>
+                                                    <p>3. If upload fails, check the debug information</p>
+                                                    <p>4. Make sure your Google Vision API key is configured</p>
+                                                </div>
+                                            </div>
                                         </div>
                                     <?php else: ?>
                                         <?php foreach ($recent_files as $file): ?>
@@ -1499,7 +2143,14 @@ function getSubjectIcon($subject)
                                                         <span class="text-white text-lg sm:text-xl">📄</span>
                                                     </div>
                                                     <div class="flex-1 min-w-0">
-                                                        <p class="font-medium text-white truncate text-sm sm:text-base"><?php echo htmlspecialchars($file['name']); ?></p>
+                                                        <div class="flex items-center space-x-2">
+                                                            <p class="font-medium text-white truncate text-sm sm:text-base"><?php echo htmlspecialchars($file['name']); ?></p>
+                                                            <?php if (isset($file['language'])): ?>
+                                                                <span class="px-1 py-0.5 rounded text-xs <?php echo $file['language'] === 'th' ? 'bg-blue-500 text-white' : 'bg-green-500 text-white'; ?> flex-shrink-0">
+                                                                    <?php echo $file['language'] === 'th' ? '🇹🇭' : '🇺🇸'; ?>
+                                                                </span>
+                                                            <?php endif; ?>
+                                                        </div>
                                                         <p class="text-xs sm:text-sm text-gray-300"><?php echo htmlspecialchars($file['subject']); ?> • <?php echo $file['date']; ?></p>
                                                         <div class="mt-1">
                                                             <span class="inline-flex items-center px-2 py-1 rounded-full text-xs bg-theme-green text-white">
@@ -1565,6 +2216,25 @@ function getSubjectIcon($subject)
                                             ?>
                                         </span>
                                     </div>
+                                    <div class="flex items-center justify-between p-3 bg-blue-500 bg-opacity-30 rounded-lg">
+                                        <div class="flex items-center">
+                                            <div class="w-6 h-6 sm:w-8 sm:h-8 bg-blue-600 rounded-lg flex items-center justify-center mr-2 sm:mr-3">
+                                                <span class="text-white text-xs sm:text-sm">🌏</span>
+                                            </div>
+                                            <span class="font-medium text-black text-sm sm:text-base">Languages</span>
+                                        </div>
+                                        <span class="text-xl sm:text-2xl font-bold text-black">
+                                            <?php
+                                            $languages = [];
+                                            foreach ($user_files as $file) {
+                                                if (isset($file['language'])) {
+                                                    $languages[$file['language']] = true;
+                                                }
+                                            }
+                                            echo count($languages) > 0 ? count($languages) : 1;
+                                            ?>
+                                        </span>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -1603,12 +2273,12 @@ function getSubjectIcon($subject)
                                     </div>
                                 </div>
                                 <div class="flex items-center space-x-2 sm:space-x-3 w-full sm:w-auto">
-                                    <button class="px-3 sm:px-4 py-2 bg-theme-light hover:bg-theme-medium text-white rounded-lg transition-colors flex-1 sm:flex-none btn-touch">
+                                    <button onclick="window.location.reload();" class="px-3 sm:px-4 py-2 bg-theme-light hover:bg-theme-medium text-white rounded-lg transition-colors flex-1 sm:flex-none btn-touch">
                                         <span class="text-xs sm:text-sm">🔄 Refresh</span>
                                     </button>
                                     <form method="post" enctype="multipart/form-data" class="inline flex-1 sm:flex-none">
                                         <label class="cursor-pointer w-full sm:w-auto">
-                                            <input type="file" name="uploaded_file" accept=".pdf,image/*" class="hidden" />
+                                            <input type="file" name="uploaded_file" accept=".pdf,image/*,.webp" class="hidden" />
                                             <div class="px-3 sm:px-4 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors cursor-pointer text-center btn-touch">
                                                 <span class="text-xs sm:text-sm">📤 Upload File</span>
                                             </div>
@@ -1629,7 +2299,7 @@ function getSubjectIcon($subject)
                                     </p>
                                     <form method="post" enctype="multipart/form-data" class="inline">
                                         <label class="cursor-pointer">
-                                            <input type="file" name="uploaded_file" accept=".pdf,image/*" class="hidden" />
+                                            <input type="file" name="uploaded_file" accept=".pdf,image/*,.webp" class="hidden" />
                                             <div class="px-4 sm:px-6 py-2 sm:py-3 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors cursor-pointer inline-flex items-center btn-touch">
                                                 <span class="mr-2">📤</span>
                                                 <span class="text-sm sm:text-base">Upload Your First File</span>
@@ -1646,7 +2316,14 @@ function getSubjectIcon($subject)
                                                     <span class="text-theme-green text-xl sm:text-2xl">📄</span>
                                                 </div>
                                                 <div class="flex-1 min-w-0">
-                                                    <h4 class="font-semibold text-white text-base sm:text-lg truncate"><?php echo htmlspecialchars($file['name']); ?></h4>
+                                                    <div class="flex items-center space-x-2 mb-1">
+                                                        <h4 class="font-semibold text-white text-base sm:text-lg truncate"><?php echo htmlspecialchars($file['name']); ?></h4>
+                                                        <?php if (isset($file['language'])): ?>
+                                                            <span class="px-2 py-1 rounded-full text-xs font-medium <?php echo $file['language'] === 'th' ? 'bg-blue-500 text-white' : 'bg-green-500 text-white'; ?> flex-shrink-0">
+                                                                <?php echo $file['language'] === 'th' ? '🇹🇭 Thai' : '🇺🇸 EN'; ?>
+                                                            </span>
+                                                        <?php endif; ?>
+                                                    </div>
                                                     <p class="text-xs sm:text-sm text-gray-300"><?php echo htmlspecialchars($file['subject']); ?> • <?php echo $file['date']; ?></p>
                                                 </div>
                                             </div>
@@ -1658,11 +2335,46 @@ function getSubjectIcon($subject)
                                         </div>
 
                                         <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 mb-3 sm:mb-4">
-                                            <p class="text-xs sm:text-sm text-black font-medium mb-1 sm:mb-2">AI Summary:</p>
+                                            <p class="text-xs sm:text-sm text-black font-medium mb-1 sm:mb-2 flex items-center">
+                                                🤖 AI Summary
+                                                <?php if (isset($file['language']) && $file['language'] === 'th'): ?>
+                                                    <span class="ml-2 px-2 py-1 rounded text-xs bg-blue-100 text-blue-800">ภาษาไทย</span>
+                                                <?php else: ?>
+                                                    <span class="ml-2 px-2 py-1 rounded text-xs bg-green-100 text-green-800">English</span>
+                                                <?php endif; ?>
+                                            </p>
                                             <p class="text-xs sm:text-sm text-black line-clamp-3">
                                                 <?php
                                                 if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-                                                    echo htmlspecialchars(substr(file_get_contents($file['summary_file_path']), 0, 200) . '...');
+                                                    $summary_content = file_get_contents($file['summary_file_path']);
+
+                                                    // Extract the main content between AI ANALYSIS and technical info
+                                                    if (preg_match('/🤖 AI ANALYSIS:\s*\n\n(.*?)\n\n.*?(?:🇺🇸|🇹🇭|📊)/s', $summary_content, $matches)) {
+                                                        $clean_summary = $matches[1];
+                                                    } else {
+                                                        $clean_summary = $summary_content;
+                                                    }
+
+                                                    // Remove emojis and clean up formatting for preview
+                                                    $clean_summary = preg_replace('/📌\s*/', '', $clean_summary);
+                                                    $clean_summary = preg_replace('/\[([^\]]+)\]:/', '$1:', $clean_summary);
+                                                    $clean_summary = trim($clean_summary);
+
+                                                    // Truncate for preview but try to end at a complete concept
+                                                    if (strlen($clean_summary) > 150) {
+                                                        $truncated = substr($clean_summary, 0, 150);
+                                                        // Try to end at a bullet point or section
+                                                        if (strpos($truncated, '•') !== false) {
+                                                            $last_bullet = strrpos($truncated, '•');
+                                                            $next_newline = strpos($clean_summary, "\n", $last_bullet);
+                                                            if ($next_newline !== false && $next_newline < 200) {
+                                                                $truncated = substr($clean_summary, 0, $next_newline);
+                                                            }
+                                                        }
+                                                        echo htmlspecialchars($truncated . '...');
+                                                    } else {
+                                                        echo htmlspecialchars($clean_summary);
+                                                    }
                                                 } else {
                                                     echo htmlspecialchars($file['summary'] ?? 'No summary available');
                                                 }
@@ -1690,13 +2402,18 @@ function getSubjectIcon($subject)
         </div>
     </div>
 
-    <!-- UPDATED File Details Modal -->
+    <!-- UPDATED File Details Modal with Language Support -->
     <div id="fileDetailsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4 no-print">
         <div class="glass-card rounded-xl sm:rounded-2xl max-w-4xl w-full max-h-[95vh] sm:max-h-[90vh] overflow-hidden border-theme-light">
             <!-- Modal Header -->
             <div class="flex items-center justify-between p-4 sm:p-6 border-b border-theme-light">
                 <div class="flex-1 min-w-0">
-                    <h3 id="modalFileName" class="text-lg sm:text-xl font-semibold text-white truncate"></h3>
+                    <div class="flex items-center space-x-3">
+                        <h3 id="modalFileName" class="text-lg sm:text-xl font-semibold text-white truncate"></h3>
+                        <span id="modalLanguageBadge" class="px-2 py-1 rounded-full text-xs font-medium bg-theme-green text-white hidden">
+                            <!-- Language badge will be populated by JavaScript -->
+                        </span>
+                    </div>
                     <p id="modalSubject" class="text-gray-300 text-sm sm:text-base"></p>
                 </div>
                 <button onclick="closeFileDetails()" class="text-gray-300 hover:text-white text-xl sm:text-2xl ml-4 btn-touch focus:outline-none focus:ring-2 focus:ring-theme-green focus:ring-opacity-50 rounded p-2">&times;</button>
@@ -1706,10 +2423,10 @@ function getSubjectIcon($subject)
             <div class="border-b border-theme-light">
                 <div class="flex">
                     <button id="summaryTab" onclick="switchTab('summary')" class="flex-1 py-3 sm:py-4 px-4 sm:px-6 text-xs sm:text-sm font-medium text-theme-green border-b-2 border-theme-green btn-touch focus:outline-none">
-                        📝 Summary & Details
+                        Summary & Details
                     </button>
                     <button id="fullTextTab" onclick="switchTab('fulltext')" class="flex-1 py-3 sm:py-4 px-4 sm:px-6 text-xs sm:text-sm font-medium text-gray-300 hover:text-white btn-touch focus:outline-none">
-                        👁️ View Original File
+                        View Original File
                     </button>
                 </div>
             </div>
@@ -1722,6 +2439,9 @@ function getSubjectIcon($subject)
                         <div>
                             <h4 class="font-semibold text-white mb-3 text-sm sm:text-base flex items-center">
                                 <span class="mr-2">🤖</span>AI Summary
+                                <span id="modalSummaryLanguage" class="ml-2 px-2 py-1 rounded text-xs bg-theme-light text-black hidden">
+                                    <!-- Summary language indicator -->
+                                </span>
                             </h4>
                             <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 border-l-4 border-theme-green">
                                 <p id="modalSummary" class="text-black text-sm sm:text-base leading-relaxed"></p>
@@ -1736,15 +2456,19 @@ function getSubjectIcon($subject)
                                 </h4>
                                 <div class="space-y-2 text-xs sm:text-sm">
                                     <div class="flex items-center">
-                                        <span class="text-gray-300 w-16">Date:</span>
+                                        <span class="text-gray-300 w-20">Date:</span>
                                         <span id="modalDate" class="text-white"></span>
                                     </div>
                                     <div class="flex items-center">
-                                        <span class="text-gray-300 w-16">Status:</span>
+                                        <span class="text-gray-300 w-20">Status:</span>
                                         <span id="modalStatus" class="text-white"></span>
                                     </div>
                                     <div class="flex items-center">
-                                        <span class="text-gray-300 w-16">ID:</span>
+                                        <span class="text-gray-300 w-20">Language:</span>
+                                        <span id="modalLanguageInfo" class="text-white"></span>
+                                    </div>
+                                    <div class="flex items-center">
+                                        <span class="text-gray-300 w-20">ID:</span>
                                         <span id="modalSize" class="text-white"></span>
                                     </div>
                                 </div>
@@ -1760,10 +2484,10 @@ function getSubjectIcon($subject)
                                         <span class="mr-2">📥</span>Download Summary
                                     </button>
                                     <button id="reanalyzeBtn" class="w-full px-3 sm:px-4 py-2 bg-theme-medium hover:bg-theme-dark text-white rounded-lg transition-colors text-xs sm:text-sm btn-touch font-medium flex items-center justify-center">
-                                        <span class="mr-2">🔄</span>Re-analyze with AI
+                                        <span class="mr-2">🔄</span><span id="reanalyzeText">Re-analyze with AI</span>
                                     </button>
                                     <button id="deleteBtn" class="w-full px-3 sm:px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors text-xs sm:text-sm btn-touch font-medium flex items-center justify-center">
-                                        <span class="mr-2">🗑️</span>Delete File
+                                        <span class="mr-2">🗑️</span><span id="deleteText">Delete File</span>
                                     </button>
                                 </div>
                             </div>
@@ -1771,14 +2495,117 @@ function getSubjectIcon($subject)
                     </div>
                 </div>
 
-                <!-- View Original File Tab - SIMPLIFIED -->
+                <!-- View Original File Tab -->
                 <div id="fulltextContent" class="tab-content hidden">
                     <div id="filePreviewContainer" class="w-full">
-                        <!-- This will be populated by JavaScript when the tab is clicked -->
                         <div class="text-center py-8">
                             <div class="text-theme-medium text-4xl mb-4">📄</div>
                             <p class="text-white mb-4">Switch to this tab to view the original file</p>
                         </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div id="settingsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4 no-print">
+        <div class="glass-card rounded-xl sm:rounded-2xl max-w-2xl w-full max-h-[95vh] sm:max-h-[90vh] overflow-hidden border-theme-light">
+            <!-- Modal Header -->
+            <div class="flex items-center justify-between p-4 sm:p-6 border-b border-theme-light">
+                <div class="flex items-center space-x-3">
+                    <div class="w-10 h-10 bg-theme-green bg-opacity-20 rounded-lg flex items-center justify-center">
+                        <span class="text-theme-green text-xl">⚙️</span>
+                    </div>
+                    <div>
+                        <h3 class="text-lg sm:text-xl font-semibold text-white">Settings</h3>
+                        <p class="text-gray-300 text-sm">Manage your OZNOTE preferences</p>
+                    </div>
+                </div>
+                <button onclick="closeSettingsPanel()" class="text-gray-300 hover:text-white text-xl sm:text-2xl ml-4 btn-touch focus:outline-none focus:ring-2 focus:ring-theme-green focus:ring-opacity-50 rounded p-2">&times;</button>
+            </div>
+
+            <!-- Modal Content -->
+            <div class="p-4 sm:p-6 max-h-[60vh] overflow-auto custom-scrollbar">
+                <!-- Under Development Section -->
+                <div class="text-center py-8 sm:py-12">
+                    <!-- Construction Icon -->
+                    <div class="text-6xl sm:text-8xl mb-4 sm:mb-6">🚧</div>
+
+                    <!-- Main Message -->
+                    <h4 class="text-xl sm:text-2xl font-bold text-white mb-3 sm:mb-4 gradient-text">Under Development</h4>
+                    <p class="text-gray-300 text-sm sm:text-base mb-6 sm:mb-8 max-w-md mx-auto">
+                        We're working hard to bring you amazing settings and customization options. Stay tuned for updates!
+                    </p>
+
+                    <!-- Coming Soon Features -->
+                    <div class="space-y-3 sm:space-y-4 mb-6 sm:mb-8">
+                        <div class="bg-theme-bright bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
+                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
+                                <span class="mr-2">🎨</span>Theme Customization
+                            </h5>
+                            <p class="text-gray-300 text-xs sm:text-sm">Choose from multiple color themes and layout options</p>
+                        </div>
+
+                        <div class="bg-theme-green bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
+                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
+                                <span class="mr-2">🌐</span>Language Preferences
+                            </h5>
+                            <p class="text-gray-300 text-xs sm:text-sm">Set default language for AI analysis and interface</p>
+                        </div>
+
+                        <div class="bg-theme-medium bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
+                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
+                                <span class="mr-2">🔔</span>Notifications
+                            </h5>
+                            <p class="text-gray-300 text-xs sm:text-sm">Configure email notifications and system alerts</p>
+                        </div>
+
+                        <div class="bg-theme-light bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
+                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
+                                <span class="mr-2">💾</span>Export Options
+                            </h5>
+                            <p class="text-gray-300 text-xs sm:text-sm">Export your data and summaries in various formats</p>
+                        </div>
+
+                        <div class="bg-blue-500 bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
+                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
+                                <span class="mr-2">🤖</span>AI Preferences
+                            </h5>
+                            <p class="text-gray-300 text-xs sm:text-sm">Customize AI analysis depth and summary style</p>
+                        </div>
+                    </div>
+
+                    <!-- Progress Indicator -->
+                    <div class="bg-theme-dark bg-opacity-30 rounded-lg p-4 sm:p-6 mb-6">
+                        <h5 class="font-semibold text-white mb-3 flex items-center justify-center text-sm sm:text-base">
+                            <span class="mr-2">📊</span>Development Progress
+                        </h5>
+                        <div class="relative">
+                            <div class="flex mb-2 items-center justify-between">
+                                <div>
+                                    <span class="text-xs font-semibold inline-block text-theme-green">
+                                        Settings Panel
+                                    </span>
+                                </div>
+                                <div class="text-right">
+                                    <span class="text-xs font-semibold inline-block text-theme-green">
+                                        25%
+                                    </span>
+                                </div>
+                            </div>
+                            <div class="overflow-hidden h-2 mb-4 text-xs flex rounded bg-theme-medium">
+                                <div style="width:25%" class="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-theme-green animate-pulse"></div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Action Buttons -->
+                    <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 justify-center">
+                        <button onclick="closeSettingsPanel()" class="px-4 sm:px-6 py-2 sm:py-3 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors btn-touch font-medium flex items-center justify-center">
+                            <span class="mr-2">👍</span>
+                            <span class="text-sm sm:text-base">Got It</span>
+                        </button>
                     </div>
                 </div>
             </div>
@@ -1838,6 +2665,120 @@ function getSubjectIcon($subject)
             }
         }
 
+        // Updated openFileDetails function to handle language information
+        function openFileDetails(fileId) {
+            console.log('Opening file details for ID:', fileId);
+
+            // Store the current file ID globally
+            currentModalFileId = fileId;
+
+            const file = fileData.find(f => f.id == fileId);
+            if (!file) {
+                console.error('File not found with ID:', fileId);
+                alert('File not found!');
+                return;
+            }
+
+            try {
+                // Get language information
+                const fileLanguage = file.language || 'en';
+                const isThaiLanguage = fileLanguage === 'th';
+
+                // Update modal content with enhanced formatting
+                document.getElementById('modalFileName').textContent = file.name || 'Unknown File';
+                document.getElementById('modalSubject').textContent = file.subject || 'Unknown Subject';
+
+                // Format the summary content for better display
+                let displaySummary = file.full_summary || (isThaiLanguage ? 'ไม่มีข้อมูลสรุป' : 'No summary available');
+
+                // Convert structured text to HTML for better display
+                if (displaySummary && displaySummary !== 'ไม่มีข้อมูลสรุป' && displaySummary !== 'No summary available') {
+                    // Replace section headers with bold formatting
+                    displaySummary = displaySummary.replace(/\[([^\]]+)\]:/g, '<strong>$1:</strong>');
+
+                    // Format bullet points
+                    displaySummary = displaySummary.replace(/\n\s*•\s*/g, '\n• ');
+                    displaySummary = displaySummary.replace(/•([^\n]+)/g, '<span style="margin-left: 1em;">• $1</span>');
+
+                    // Add line breaks for better spacing
+                    displaySummary = displaySummary.replace(/\n\n/g, '<br><br>');
+                    displaySummary = displaySummary.replace(/\n/g, '<br>');
+
+                    // Highlight keywords section
+                    displaySummary = displaySummary.replace(/<strong>(Important Keywords|คำศัพท์สำคัญ):<\/strong>\s*([^<]+)/g,
+                        '<strong>$1:</strong><br><span style="background-color: rgba(129, 249, 121, 0.2); padding: 2px 6px; border-radius: 4px; font-weight: 500;">$2</span>');
+                }
+
+                document.getElementById('modalSummary').innerHTML = displaySummary;
+
+                // Update language badge and info
+                const languageBadge = document.getElementById('modalLanguageBadge');
+                const languageInfo = document.getElementById('modalLanguageInfo');
+                const summaryLanguage = document.getElementById('modalSummaryLanguage');
+
+                if (isThaiLanguage) {
+                    languageBadge.textContent = '🇹🇭 Thai';
+                    languageBadge.className = 'px-2 py-1 rounded-full text-xs font-medium bg-blue-500 text-white';
+                    languageInfo.textContent = 'Thai (ภาษาไทย)';
+                    summaryLanguage.textContent = 'ภาษาไทย';
+                    summaryLanguage.className = 'ml-2 px-2 py-1 rounded text-xs bg-blue-100 text-blue-800';
+                } else {
+                    languageBadge.textContent = '🇺🇸 EN';
+                    languageBadge.className = 'px-2 py-1 rounded-full text-xs font-medium bg-green-500 text-white';
+                    languageInfo.textContent = 'English';
+                    summaryLanguage.textContent = 'English';
+                    summaryLanguage.className = 'ml-2 px-2 py-1 rounded text-xs bg-green-100 text-green-800';
+                }
+
+                languageBadge.classList.remove('hidden');
+                summaryLanguage.classList.remove('hidden');
+
+                // Update button text based on language
+                const reanalyzeText = document.getElementById('reanalyzeText');
+                const deleteText = document.getElementById('deleteText');
+
+                if (isThaiLanguage) {
+                    reanalyzeText.textContent = 'วิเคราะห์ใหม่ด้วย AI';
+                    deleteText.textContent = 'ลบไฟล์';
+                } else {
+                    reanalyzeText.textContent = 'Re-analyze with AI';
+                    deleteText.textContent = 'Delete File';
+                }
+
+                // Update other modal content
+                document.getElementById('modalDate').textContent = 'Uploaded: ' + (file.date || 'Unknown date');
+                document.getElementById('modalStatus').textContent = 'Status: ' + (file.status || 'Completed');
+                document.getElementById('modalSize').textContent = 'File ID: ' + file.id;
+
+                // Reset the file preview container to default state
+                const filePreviewContainer = document.getElementById('filePreviewContainer');
+                if (filePreviewContainer) {
+                    filePreviewContainer.innerHTML = `
+                        <div class="text-center py-8">
+                            <div class="text-theme-medium text-4xl mb-4">📄</div>
+                            <p class="text-white mb-4">${isThaiLanguage ? 'เปลี่ยนมาที่แท็บนี้เพื่อดูไฟล์ต้นฉบับ' : 'Switch to this tab to view the original file'}</p>
+                        </div>
+                    `;
+                }
+
+                // Set up action buttons
+                setupModalActions(file.id);
+
+                // Reset to summary tab
+                switchTab('summary');
+
+                // Show modal
+                document.getElementById('fileDetailsModal').classList.remove('hidden');
+                document.body.style.overflow = 'hidden';
+
+                console.log('Modal opened successfully with language:', fileLanguage);
+            } catch (error) {
+                console.error('Error opening modal:', error);
+                alert('Error opening file details');
+            }
+        }
+
+        // Updated loadFileOptions function to handle language-specific text
         function loadFileOptions() {
             const container = document.getElementById('filePreviewContainer');
             const currentFileId = getCurrentFileId();
@@ -1856,14 +2797,15 @@ function getSubjectIcon($subject)
             const file = fileData.find(f => f.id == currentFileId);
             const fileName = file ? file.name : 'Unknown File';
             const fileExtension = fileName.split('.').pop().toLowerCase();
+            const isThaiLanguage = file && file.language === 'th';
 
-            // Create simple, clear options
+            // Create simple, clear options with language-appropriate text
             container.innerHTML = `
                 <div class="space-y-6">
                     <div class="text-center">
                         <div class="text-theme-green text-5xl mb-3">📄</div>
                         <h4 class="text-white text-lg font-semibold">${fileName}</h4>
-                        <p class="text-gray-300 text-sm">Choose how you want to view this file</p>
+                        <p class="text-gray-300 text-sm">${isThaiLanguage ? 'เลือกวิธีการดูไฟล์' : 'Choose how you want to view this file'}</p>
                     </div>
                     
                     <!-- Primary Actions -->
@@ -1871,40 +2813,40 @@ function getSubjectIcon($subject)
                         <!-- View in New Tab -->
                         <div class="bg-theme-bright bg-opacity-20 rounded-lg p-4 text-center hover:bg-opacity-30 transition-all">
                             <div class="text-theme-green text-3xl mb-3">🔗</div>
-                            <h5 class="text-white font-semibold mb-2">Open in New Tab</h5>
-                            <p class="text-gray-300 text-sm mb-4">Best for viewing and zooming</p>
+                            <h5 class="text-black font-semibold mb-2">${isThaiLanguage ? 'เปิดในแท็บใหม่' : 'Open in New Tab'}</h5>
+                            <p class="text-gray-300 text-sm mb-4">${isThaiLanguage ? 'เหมาะสำหรับการดูและซูม' : 'Best for viewing and zooming'}</p>
                             <button onclick="viewFileInBrowser(${currentFileId})" 
                                     class="w-full px-4 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors btn-touch font-medium">
-                                Open File →
+                                ${isThaiLanguage ? 'เปิดไฟล์ →' : 'Open File →'}
                             </button>
                         </div>
                         
                         <!-- Download -->
                         <div class="bg-theme-light bg-opacity-20 rounded-lg p-4 text-center hover:bg-opacity-30 transition-all">
                             <div class="text-theme-medium text-3xl mb-3">💾</div>
-                            <h5 class="text-white font-semibold mb-2">Download</h5>
-                            <p class="text-gray-300 text-sm mb-4">Save to your device</p>
+                            <h5 class="text-white font-semibold mb-2">${isThaiLanguage ? 'ดาวน์โหลด' : 'Download'}</h5>
+                            <p class="text-gray-300 text-sm mb-4">${isThaiLanguage ? 'บันทึกลงในอุปกรณ์' : 'Save to your device'}</p>
                             <button onclick="downloadFile(${currentFileId})" 
                                     class="w-full px-4 py-2 bg-theme-medium hover:bg-theme-dark text-white rounded-lg transition-colors btn-touch font-medium">
-                                Download ⬇️
+                                ${isThaiLanguage ? 'ดาวน์โหลด ⬇️' : 'Download ⬇️'}
                             </button>
                         </div>
                     </div>
                     
                     <!-- Preview Option (only for supported file types) -->
-                    ${(fileExtension === 'pdf' || ['jpg', 'jpeg', 'png', 'gif'].includes(fileExtension)) ? `
+                    ${(fileExtension === 'pdf' || ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(fileExtension)) ? `
                     <div class="border-t border-theme-light pt-4">
                         <div class="bg-theme-green bg-opacity-10 rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
                                 <div>
-                                    <h5 class="text-white font-semibold flex items-center">
-                                        <span class="mr-2">👁️</span>Quick Preview
+                                    <h5 class="text-black font-semibold flex items-center">
+                                        <span class="mr-2">👁️</span>${isThaiLanguage ? 'ดูตัวอย่างด่วน' : 'Quick Preview'}
                                     </h5>
-                                    <p class="text-gray-300 text-sm">Preview the file below (may take a moment to load)</p>
+                                    <p class="text-black-300 text-sm">${isThaiLanguage ? 'ดูตัวอย่างไฟล์ด้านล่าง (อาจใช้เวลาสักครู่)' : 'Preview the file below (may take a moment to load)'}</p>
                                 </div>
                                 <button onclick="showInlinePreview(${currentFileId})" 
                                         class="px-4 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors btn-touch font-medium">
-                                    Show Preview
+                                    ${isThaiLanguage ? 'แสดงตัวอย่าง' : 'Show Preview'}
                                 </button>
                             </div>
                         </div>
@@ -1914,8 +2856,10 @@ function getSubjectIcon($subject)
                         <div class="bg-yellow-500 bg-opacity-10 rounded-lg p-4 text-center">
                             <div class="text-yellow-400 text-2xl mb-2">ℹ️</div>
                             <p class="text-yellow-200 text-sm">
-                                This file type (${fileExtension.toUpperCase()}) cannot be previewed inline. 
-                                Use "Open in New Tab" or "Download" to view it.
+                                ${isThaiLanguage 
+                                    ? `ไฟล์ประเภท ${fileExtension.toUpperCase()} ไม่สามารถดูตัวอย่างได้ กรุณาใช้ "เปิดในแท็บใหม่" หรือ "ดาวน์โหลด"`
+                                    : `This file type (${fileExtension.toUpperCase()}) cannot be previewed inline. Use "Open in New Tab" or "Download" to view it.`
+                                }
                             </p>
                         </div>
                     </div>
@@ -1940,24 +2884,27 @@ function getSubjectIcon($subject)
             document.body.removeChild(link);
         }
 
+        // Updated showInlinePreview function with language support
         function showInlinePreview(fileId) {
             const container = document.getElementById('filePreviewContainer');
+            const file = fileData.find(f => f.id == fileId);
+            const isThaiLanguage = file && file.language === 'th';
 
             // Show loading state
             container.innerHTML = `
                 <div class="space-y-4">
                     <div class="flex items-center justify-between">
-                        <h5 class="text-white font-semibold">File Preview</h5>
+                        <h5 class="text-white font-semibold">${isThaiLanguage ? 'ตัวอย่างไฟล์' : 'File Preview'}</h5>
                         <button onclick="loadFileOptions()" 
                                 class="px-3 py-1 bg-theme-medium hover:bg-theme-dark text-white rounded transition-colors text-sm btn-touch">
-                            ← Back to Options
+                            ← ${isThaiLanguage ? 'กลับไปที่ตัวเลือก' : 'Back to Options'}
                         </button>
                     </div>
                     <div class="border border-theme-light rounded-lg overflow-hidden">
                         <div id="iframeContainer" class="w-full h-96 flex items-center justify-center bg-gray-100" style="min-height: 500px;">
                             <div class="text-center">
                                 <div class="animate-spin rounded-full h-12 w-12 border-b-4 border-theme-green mx-auto mb-4"></div>
-                                <p class="text-gray-600">Loading preview...</p>
+                                <p class="text-gray-600">${isThaiLanguage ? 'กำลังโหลดตัวอย่าง...' : 'Loading preview...'}</p>
                             </div>
                         </div>
                     </div>
@@ -2010,30 +2957,33 @@ function getSubjectIcon($subject)
             iframeContainer.appendChild(iframe);
         }
 
+        // Updated handleIframeError function with language support
         function handleIframeError(fileId) {
-            // Iframe failed to load, show alternative options
             const container = document.getElementById('filePreviewContainer');
+            const file = fileData.find(f => f.id == fileId);
+            const isThaiLanguage = file && file.language === 'th';
+
             container.innerHTML = `
                 <div class="space-y-4">
                     <div class="flex items-center justify-between">
-                        <h5 class="text-white font-semibold">File Preview</h5>
+                        <h5 class="text-white font-semibold">${isThaiLanguage ? 'ตัวอย่างไฟล์' : 'File Preview'}</h5>
                         <button onclick="loadFileOptions()" 
                                 class="px-3 py-1 bg-theme-medium hover:bg-theme-dark text-white rounded transition-colors text-sm btn-touch">
-                            ← Back to Options
+                            ← ${isThaiLanguage ? 'กลับไปที่ตัวเลือก' : 'Back to Options'}
                         </button>
                     </div>
                     <div class="text-center space-y-4 py-8">
                         <div class="text-yellow-400 text-4xl mb-4">⚠️</div>
-                        <h5 class="text-white font-semibold">Preview timeout or error</h5>
-                        <p class="text-gray-300 text-sm">The file is taking too long to load or cannot be previewed inline</p>
+                        <h5 class="text-white font-semibold">${isThaiLanguage ? 'หมดเวลาหรือเกิดข้อผิดพลาด' : 'Preview timeout or error'}</h5>
+                        <p class="text-gray-300 text-sm">${isThaiLanguage ? 'ไฟล์ใช้เวลาโหลดนานเกินไป หรือไม่สามารถแสดงตัวอย่างได้' : 'The file is taking too long to load or cannot be previewed inline'}</p>
                         <div class="flex flex-col sm:flex-row gap-4 justify-center max-w-md mx-auto">
                             <button onclick="viewFileInBrowser(${fileId})" 
                                     class="px-4 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors btn-touch">
-                                Open in New Tab
+                                ${isThaiLanguage ? 'เปิดในแท็บใหม่' : 'Open in New Tab'}
                             </button>
                             <button onclick="downloadFile(${fileId})" 
                                     class="px-4 py-2 bg-theme-medium hover:bg-theme-dark text-white rounded-lg transition-colors btn-touch">
-                                Download File
+                                ${isThaiLanguage ? 'ดาวน์โหลดไฟล์' : 'Download File'}
                             </button>
                         </div>
                     </div>
@@ -2071,57 +3021,6 @@ function getSubjectIcon($subject)
             }
         }
 
-        // File modal functions
-        function openFileDetails(fileId) {
-            console.log('Opening file details for ID:', fileId);
-
-            // Store the current file ID globally
-            currentModalFileId = fileId;
-
-            const file = fileData.find(f => f.id == fileId);
-            if (!file) {
-                console.error('File not found with ID:', fileId);
-                alert('File not found!');
-                return;
-            }
-
-            try {
-                // Update modal content
-                document.getElementById('modalFileName').textContent = file.name || 'Unknown File';
-                document.getElementById('modalSubject').textContent = file.subject || 'Unknown Subject';
-                document.getElementById('modalSummary').textContent = file.full_summary || 'No summary available';
-                document.getElementById('modalDate').textContent = 'Uploaded: ' + (file.date || 'Unknown date');
-                document.getElementById('modalStatus').textContent = 'Status: ' + (file.status || 'Completed');
-                document.getElementById('modalSize').textContent = 'File ID: ' + file.id;
-
-                // Reset the file preview container to default state
-                const filePreviewContainer = document.getElementById('filePreviewContainer');
-                if (filePreviewContainer) {
-                    filePreviewContainer.innerHTML = `
-                        <div class="text-center py-8">
-                            <div class="text-theme-medium text-4xl mb-4">📄</div>
-                            <p class="text-white mb-4">Switch to this tab to view the original file</p>
-                        </div>
-                    `;
-                }
-
-                // Set up action buttons
-                setupModalActions(file.id);
-
-                // Reset to summary tab
-                switchTab('summary');
-
-                // Show modal
-                document.getElementById('fileDetailsModal').classList.remove('hidden');
-                document.body.style.overflow = 'hidden';
-
-                console.log('Modal opened successfully');
-            } catch (error) {
-                console.error('Error opening modal:', error);
-                alert('Error opening file details');
-            }
-        }
-
         function closeFileDetails() {
             document.getElementById('fileDetailsModal').classList.add('hidden');
             document.body.style.overflow = '';
@@ -2155,6 +3054,47 @@ function getSubjectIcon($subject)
                         window.location.href = `?action=delete_file&file_id=${fileId}&tab=<?php echo $active_tab; ?><?php echo $selected_subject ? '&subject=' . urlencode($selected_subject) : ''; ?>`;
                     }
                 };
+            }
+        }
+
+        // Settings Panel Functions
+        function openSettingsPanel() {
+            console.log('Opening settings panel...');
+
+            // Close mobile sidebar if it's open
+            if (window.innerWidth <= 768) {
+                const sidebar = document.getElementById('sidebar');
+                const overlay = document.getElementById('mobileOverlay');
+                const menuBtn = document.getElementById('mobileMenuBtn');
+
+                if (sidebar && sidebar.classList.contains('active')) {
+                    sidebar.classList.remove('active');
+                    overlay.classList.remove('active');
+                    menuBtn.classList.remove('hidden');
+                }
+            }
+
+            const modal = document.getElementById('settingsModal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                document.body.style.overflow = 'hidden';
+
+                // Add a subtle animation
+                setTimeout(() => {
+                    modal.style.opacity = '1';
+                }, 10);
+            } else {
+                console.error('Settings modal not found');
+            }
+        }
+
+        function closeSettingsPanel() {
+            console.log('Closing settings panel...');
+            const modal = document.getElementById('settingsModal');
+            if (modal) {
+                modal.classList.add('hidden');
+                document.body.style.overflow = '';
+                modal.style.opacity = '0';
             }
         }
 
@@ -2231,9 +3171,24 @@ function getSubjectIcon($subject)
             }
         });
 
+        // Close settings modal when clicking outside
+        document.getElementById('settingsModal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeSettingsPanel();
+            }
+        });
+
         // Close modal with Escape key
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
+                // Close settings modal
+                const settingsModal = document.getElementById('settingsModal');
+                if (settingsModal && !settingsModal.classList.contains('hidden')) {
+                    closeSettingsPanel();
+                    return; // Exit early if settings was open
+                }
+
+                // Close file details modal
                 closeFileDetails();
 
                 // Also close mobile sidebar if open
@@ -2276,9 +3231,9 @@ function getSubjectIcon($subject)
                     <div class="glass-card rounded-xl sm:rounded-2xl p-6 sm:p-8 text-center max-w-md mx-auto border-theme-light">
                         <div class="animate-spin rounded-full h-12 w-12 sm:h-16 sm:w-16 border-b-4 border-theme-green mx-auto mb-4 sm:mb-6"></div>
                         <h3 class="text-lg sm:text-xl font-semibold text-white mb-2">Processing your file...</h3>
-                        <p class="text-gray-300 mb-2 text-sm sm:text-base">OCR and AI analysis in progress</p>
+                        <p class="text-gray-300 mb-2 text-sm sm:text-base">Google Vision OCR and enhanced AI analysis in progress</p>
                         <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 mt-4">
-                            <p class="text-black text-xs sm:text-sm">⚡ This may take a few moments for larger files</p>
+                            <p class="text-black text-xs sm:text-sm">🌏 Creating detailed summaries with bullet points, key concepts, and important keywords</p>
                         </div>
                     </div>
                 `;
@@ -2292,6 +3247,12 @@ function getSubjectIcon($subject)
         // Add smooth transitions for navigation
         document.querySelectorAll('a[href*="tab="]').forEach(link => {
             link.addEventListener('click', function(e) {
+                // Close settings modal if open
+                const settingsModal = document.getElementById('settingsModal');
+                if (settingsModal && !settingsModal.classList.contains('hidden')) {
+                    closeSettingsPanel();
+                }
+
                 // Close mobile sidebar on navigation
                 if (window.innerWidth <= 768) {
                     const sidebar = document.getElementById('sidebar');
@@ -2311,6 +3272,7 @@ function getSubjectIcon($subject)
         document.addEventListener('keydown', function(e) {
             // Don't trigger shortcuts when modal is open or when typing in inputs
             if (document.getElementById('fileDetailsModal').classList.contains('hidden') &&
+                document.getElementById('settingsModal').classList.contains('hidden') &&
                 !e.target.matches('input, textarea, select')) {
 
                 // Ctrl/Cmd + U for upload
@@ -2332,6 +3294,12 @@ function getSubjectIcon($subject)
                     window.location.href = '?tab=subjects';
                 }
 
+                // Ctrl/Cmd + , for settings
+                if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+                    e.preventDefault();
+                    openSettingsPanel();
+                }
+
                 // M key for mobile menu toggle
                 if (e.key === 'm' || e.key === 'M') {
                     if (window.innerWidth <= 768) {
@@ -2342,14 +3310,148 @@ function getSubjectIcon($subject)
             }
         });
 
-        // Touch interactions for mobile
+        // API Configuration Test Function
+        function testAPIConfiguration() {
+            // Show loading state
+            const testButton = event.target;
+            const originalText = testButton.textContent;
+            testButton.textContent = 'Testing...';
+            testButton.disabled = true;
+
+            fetch('?action=test_api')
+                .then(response => response.json())
+                .then(data => {
+                    showAPITestResults(data);
+                })
+                .catch(error => {
+                    console.error('API test error:', error);
+                    showAPITestResults({
+                        error: 'Failed to run API test: ' + error.message
+                    });
+                })
+                .finally(() => {
+                    testButton.textContent = originalText;
+                    testButton.disabled = false;
+                });
+        }
+
+        function showAPITestResults(results) {
+            // Create modal for test results
+            const modal = document.createElement('div');
+            modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4';
+
+            let modalContent = `
+                <div class="glass-card rounded-xl max-w-2xl w-full max-h-[90vh] overflow-hidden border-theme-light">
+                    <div class="flex items-center justify-between p-6 border-b border-theme-light">
+                        <h3 class="text-xl font-semibold text-white">🔧 API Configuration Test Results</h3>
+                        <button onclick="this.closest('.fixed').remove()" class="text-gray-300 hover:text-white text-2xl">&times;</button>
+                    </div>
+                    <div class="p-6 max-h-[60vh] overflow-auto custom-scrollbar">
+            `;
+
+            if (results.error) {
+                modalContent += `
+                    <div class="bg-red-900 bg-opacity-50 border border-red-600 rounded-lg p-4">
+                        <h4 class="text-red-300 font-medium mb-2">❌ Test Failed</h4>
+                        <p class="text-red-200">${results.error}</p>
+                    </div>
+                `;
+            } else {
+                // Google Vision results
+                if (results.google_vision) {
+                    const gv = results.google_vision;
+                    const statusColor = gv.status === 'success' ? 'green' : gv.status === 'warning' ? 'yellow' : 'red';
+                    const statusIcon = gv.status === 'success' ? '✅' : gv.status === 'warning' ? '⚠️' : '❌';
+
+                    modalContent += `
+                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
+                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} Google Vision API</h4>
+                            <p class="text-${statusColor}-200">${gv.message}</p>
+                        </div>
+                    `;
+                }
+
+                // Claude results
+                if (results.claude) {
+                    const cl = results.claude;
+                    const statusColor = cl.status === 'success' ? 'green' : cl.status === 'info' ? 'blue' : 'red';
+                    const statusIcon = cl.status === 'success' ? '✅' : cl.status === 'info' ? 'ℹ️' : '❌';
+
+                    modalContent += `
+                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
+                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} Claude AI API</h4>
+                            <p class="text-${statusColor}-200">${cl.message}</p>
+                        </div>
+                    `;
+                }
+
+                // Filesystem results
+                if (results.filesystem) {
+                    const fs = results.filesystem;
+                    const statusColor = fs.status === 'success' ? 'green' : 'red';
+                    const statusIcon = fs.status === 'success' ? '✅' : '❌';
+
+                    modalContent += `
+                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
+                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} File System</h4>
+                            <p class="text-${statusColor}-200">${fs.message}</p>
+                        </div>
+                    `;
+                }
+
+                // Next steps
+                modalContent += `
+                    <div class="bg-blue-900 bg-opacity-50 border border-blue-600 rounded-lg p-4">
+                        <h4 class="text-blue-300 font-medium mb-2">📝 Next Steps</h4>
+                        <div class="text-blue-200 text-sm space-y-2">
+                `;
+
+                if (results.google_vision && results.google_vision.status !== 'success') {
+                    modalContent += `
+                        <p>• Configure Google Vision API key in the dashboard.php file</p>
+                        <p>• Visit <a href="https://console.cloud.google.com/" target="_blank" class="text-blue-300 underline">Google Cloud Console</a> to get an API key</p>
+                    `;
+                }
+
+                if (results.google_vision && results.google_vision.status === 'success') {
+                    modalContent += `<p>• ✅ Google Vision API is ready to use</p>`;
+                }
+
+                modalContent += `
+                        <p>• Try uploading a test image or PDF to verify the complete workflow</p>
+                        <p>• Check the debug information if uploads still fail</p>
+                        </div>
+                    </div>
+                `;
+            }
+
+            modalContent += `
+                    </div>
+                    <div class="p-6 border-t border-theme-light">
+                        <button onclick="this.closest('.fixed').remove()" class="px-6 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors">
+                            Close
+                        </button>
+                    </div>
+                </div>
+            `;
+
+            modal.innerHTML = modalContent;
+            document.body.appendChild(modal);
+
+            // Close modal when clicking outside
+            modal.addEventListener('click', function(e) {
+                if (e.target === modal) {
+                    modal.remove();
+                }
+            });
+        }
         if ('ontouchstart' in window) {
             document.addEventListener('touchstart', function() {}, {
                 passive: true
             });
         }
 
-        console.log('All event listeners set up successfully');
+        console.log('All event listeners set up successfully with Google Vision OCR support');
     </script>
 </body>
 
