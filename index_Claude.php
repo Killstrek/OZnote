@@ -1,6 +1,9 @@
 <?php
 session_start();
 
+header('Content-Type: text/html; charset=UTF-8');
+mb_internal_encoding('UTF-8');
+
 // Include authentication functions
 require_once 'auth.php'; // This should contain your login functions
 
@@ -10,83 +13,163 @@ if (!isLoggedIn()) {
     exit();
 }
 
+// Load secure configuration and database FIRST
+require_once 'config.php';
+require_once 'database.php';
+
+// Configuration
+define('UPLOAD_DIR', 'uploads/');
+define('CLAUDE_API_KEY', '');
+
+// Enhanced cleanForJson function (defined early to avoid conflicts)
+function cleanForJsonSafe($text)
+{
+    if (!$text) return '';
+
+    try {
+        // Convert to UTF-8 if needed
+        $clean = mb_convert_encoding($text, 'UTF-8', 'auto');
+
+        // Remove control characters that break JSON
+        $clean = preg_replace('/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/', '', $clean);
+
+        // Handle problematic characters more carefully
+        $clean = str_replace(["\r\n", "\r", "\n"], ' ', $clean);
+
+        // Clean up multiple spaces
+        $clean = preg_replace('/\s+/', ' ', trim($clean));
+
+        // Additional safety: remove any remaining non-printable characters
+        $clean = preg_replace('/[^\P{C}]+/u', '', $clean);
+
+        return $clean;
+    } catch (Exception $e) {
+        error_log("Error in cleanForJsonSafe: " . $e->getMessage());
+        return ''; // Return empty string on error
+    }
+}
+
+// Safe JSON encoding function
+function safeJsonEncode($data)
+{
+    try {
+        // First attempt with our flags
+        $json = json_encode($data, JSON_UNESCAPED_UNICODE | JSON_HEX_QUOT | JSON_HEX_APOS | JSON_HEX_TAG | JSON_PARTIAL_OUTPUT_ON_ERROR);
+
+        if ($json === false) {
+            error_log("JSON encoding failed: " . json_last_error_msg());
+
+            // Clean the data more aggressively
+            $cleaned_data = array_map(function ($item) {
+                if (is_array($item)) {
+                    return array_map(function ($value) {
+                        if (is_string($value)) {
+                            return cleanForJsonSafe($value);
+                        }
+                        return $value;
+                    }, $item);
+                }
+                return $item;
+            }, $data);
+
+            // Try again with cleaned data
+            $json = json_encode($cleaned_data, JSON_UNESCAPED_UNICODE | JSON_HEX_QUOT | JSON_HEX_APOS | JSON_HEX_TAG);
+        }
+
+        if ($json === false) {
+            error_log("JSON encoding failed even after cleaning: " . json_last_error_msg());
+            return '[]'; // Return empty array as fallback
+        }
+
+        return $json;
+    } catch (Exception $e) {
+        error_log("Exception in safeJsonEncode: " . $e->getMessage());
+        return '[]';
+    }
+}
+
+// Enhanced getUserFiles function with better error handling
+function getUserFilesSafe($user_id)
+{
+    try {
+        $pdo = getDBConnection();
+
+        // Check if language column exists
+        try {
+            $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
+            if ($check_column->rowCount() == 0) {
+                $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
+                error_log("Added language column to user_files table");
+            }
+        } catch (Exception $e) {
+            error_log("Error checking/adding language column: " . $e->getMessage());
+        }
+
+        $sql = "SELECT *, DATE(created_at) as date FROM user_files WHERE user_id = ? ORDER BY created_at DESC";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$user_id]);
+        $files = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        $formatted_files = [];
+        foreach ($files as $file) {
+            try {
+                // Safe file reading with UTF-8 support
+                $summary_content = 'No summary available';
+                $full_summary = 'No summary available';
+
+                if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
+                    $file_contents = file_get_contents($file['summary_file_path']);
+                    if ($file_contents !== false) {
+                        // Ensure UTF-8 encoding and safe substring
+                        $full_summary = mb_convert_encoding($file_contents, 'UTF-8', 'auto');
+                        $summary_content = mb_substr($full_summary, 0, 200, 'UTF-8') . '...';
+                    }
+                }
+
+                // Get language info (default to English if not set)
+                $file_language = isset($file['language']) ? $file['language'] : 'en';
+
+                // Set appropriate "No summary" message based on language
+                if ($summary_content === 'No summary available') {
+                    $summary_content = ($file_language === 'th') ? 'ไม่มีข้อมูลสรุป' : 'No summary available';
+                    $full_summary = $summary_content;
+                }
+
+                // CRITICAL: Clean all text data for safe JSON encoding
+                $formatted_files[] = [
+                    'id' => (int)$file['id'],
+                    'name' => cleanForJsonSafe($file['file_name'] ?? ''),
+                    'subject' => cleanForJsonSafe($file['subject'] ?? ''),
+                    'date' => $file['date'] ?? date('Y-m-d'),
+                    'summary' => cleanForJsonSafe($summary_content),
+                    'full_summary' => cleanForJsonSafe($full_summary),
+                    'language' => $file_language,
+                    'status' => 'completed',
+                    'debug_info' => '',
+                    'extracted_text' => '',
+                    'summary_file_path' => $file['summary_file_path'] ?? '',
+                    'original_file_path' => $file['original_file_path'] ?? ''
+                ];
+            } catch (Exception $e) {
+                error_log("Error processing file ID {$file['id']}: " . $e->getMessage());
+                // Skip corrupted files rather than breaking everything
+                continue;
+            }
+        }
+
+        return $formatted_files;
+    } catch (Exception $e) {
+        error_log("Error in getUserFilesSafe: " . $e->getMessage());
+        return []; // Return empty array on error
+    }
+}
+
 // Handle logout
 if (isset($_GET['action']) && $_GET['action'] === 'logout') {
     logout(); // This will redirect to login.php
 }
 
-// Handle API test request
-if (isset($_GET['action']) && $_GET['action'] === 'test_api') {
-    header('Content-Type: application/json');
-
-    $test_results = [];
-
-    // Test Tesseract OCR
-    $test_results['tesseract'] = [];
-    
-    // Check if Tesseract is installed
-    $tesseract_version = shell_exec('tesseract --version 2>&1');
-    if (strpos($tesseract_version, 'tesseract') !== false) {
-        $test_results['tesseract']['status'] = 'success';
-        $test_results['tesseract']['message'] = 'Tesseract is installed and accessible';
-        $test_results['tesseract']['version'] = trim(explode("\n", $tesseract_version)[0]);
-        
-        // Check for language support
-        $languages = shell_exec('tesseract --list-langs 2>&1');
-        if (strpos($languages, 'eng') !== false) {
-            $test_results['tesseract']['languages'] = 'English support: ✅';
-        } else {
-            $test_results['tesseract']['languages'] = 'English support: ❌';
-        }
-        
-        if (strpos($languages, 'tha') !== false) {
-            $test_results['tesseract']['languages'] .= ' | Thai support: ✅';
-        } else {
-            $test_results['tesseract']['languages'] .= ' | Thai support: ❌';
-        }
-
-        // Test PDF support
-        $test_results['tesseract']['pdf_support'] = 'PDF support: ✅ (Direct processing)';
-    } else {
-        $test_results['tesseract']['status'] = 'error';
-        $test_results['tesseract']['message'] = 'Tesseract is not installed or not accessible';
-    }
-
-    // Test Claude API
-    $test_results['claude'] = [];
-    if (empty(CLAUDE_API_KEY)) {
-        $test_results['claude']['status'] = 'error';
-        $test_results['claude']['message'] = 'Claude API key not configured';
-    } else {
-        $test_results['claude']['status'] = 'info';
-        $test_results['claude']['message'] = 'Claude API key is configured (test requires actual content)';
-    }
-
-    // Test file system
-    $test_results['filesystem'] = [];
-    if (!is_writable(UPLOAD_DIR)) {
-        $test_results['filesystem']['status'] = 'error';
-        $test_results['filesystem']['message'] = 'Upload directory is not writable';
-    } else {
-        $test_results['filesystem']['status'] = 'success';
-        $test_results['filesystem']['message'] = 'Upload directory is writable';
-    }
-
-    // Test pdftotext (optional but helpful for text-based PDFs)
-    $test_results['pdftotext'] = [];
-    $pdftotext_test = shell_exec('pdftotext -v 2>&1');
-    if ($pdftotext_test && strpos($pdftotext_test, 'pdftotext') !== false) {
-        $test_results['pdftotext']['status'] = 'success';
-        $test_results['pdftotext']['message'] = 'pdftotext available for fast PDF text extraction';
-    } else {
-        $test_results['pdftotext']['status'] = 'warning';
-        $test_results['pdftotext']['message'] = 'pdftotext not available - will use Tesseract for all PDFs';
-    }
-
-    echo json_encode($test_results);
-    exit();
-}
-
+// Handle file viewing/download/delete/reanalyze requests
 if (isset($_GET['action']) && isset($_SESSION['user_id'])) {
     $user_id = $_SESSION['user_id'];
 
@@ -110,190 +193,142 @@ if (isset($_GET['action']) && isset($_SESSION['user_id'])) {
         }
     }
 }
-
-// Configuration - UPDATED TO USE TESSERACT OCR
-define('UPLOAD_DIR', 'uploads/');
-define('CLAUDE_API_KEY', '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'); // Add your Claude API key
-
-// TESSERACT OCR CONFIGURATION
-define('TESSERACT_CMD', 'tesseract'); // Path to tesseract executable
-define('TESSERACT_LANG_DEFAULT', 'eng'); // Default language
-define('TESSERACT_LANG_THAI', 'tha'); // Thai language code
-define('TESSERACT_TEMP_DIR', sys_get_temp_dir()); // Temporary directory for processing
-
-// Database connection functions
-function getDBConnection()
+function testClaudeAPIConnection()
 {
-    $host = 'localhost';
-    $dbname = 'u182463273_ozn';
-    $username = 'u182463273_ozn';
-    $password = 'K640dFQRk4^';
+    $api_key = CLAUDE_API_KEY;
 
-    try {
-        $pdo = new PDO("mysql:host=$host;dbname=$dbname", $username, $password);
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        return $pdo;
-    } catch (PDOException $e) {
-        die("Connection failed: " . $e->getMessage());
-    }
-}
-
-// UPDATED: Save file to database with language support
-function saveFileToDatabase($user_id, $file_name, $subject, $file_type, $original_file_path, $summary_file_path, $language = 'en')
-{
-    $pdo = getDBConnection();
-
-    // Check if language column exists, if not add it
-    try {
-        $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
-        if ($check_column->rowCount() == 0) {
-            $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
-            error_log("Added language column to user_files table");
-        }
-    } catch (Exception $e) {
-        error_log("Error checking/adding language column: " . $e->getMessage());
-    }
-
-    $sql = "INSERT INTO user_files (user_id, file_name, subject, file_type, language, original_file_path, summary_file_path) 
-            VALUES (?, ?, ?, ?, ?, ?, ?)";
-
-    $stmt = $pdo->prepare($sql);
-    return $stmt->execute([$user_id, $file_name, $subject, $file_type, $language, $original_file_path, $summary_file_path]);
-}
-
-// UPDATED: Get user files from database with language information
-function getUserFiles($user_id)
-{
-    $pdo = getDBConnection();
-
-    // Check if language column exists, if not add it with default value
-    try {
-        $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
-        if ($check_column->rowCount() == 0) {
-            $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
-            error_log("Added language column to user_files table");
-        }
-    } catch (Exception $e) {
-        error_log("Error checking/adding language column: " . $e->getMessage());
-    }
-
-    $sql = "SELECT *, DATE(created_at) as date FROM user_files WHERE user_id = ? ORDER BY created_at DESC";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([$user_id]);
-
-    $files = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    $formatted_files = [];
-    foreach ($files as $file) {
-        // Read summary directly from file
-        $summary_content = 'No summary available';
-        $full_summary = 'No summary available';
-        if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-            $full_summary = file_get_contents($file['summary_file_path']);
-            $summary_content = substr($full_summary, 0, 200) . '...';
-        }
-
-        // Get language info (default to English if not set)
-        $file_language = isset($file['language']) ? $file['language'] : 'en';
-
-        // Set appropriate "No summary" message based on language
-        if ($summary_content === 'No summary available') {
-            $summary_content = ($file_language === 'th') ? 'ไม่มีข้อมูลสรุป' : 'No summary available';
-            $full_summary = $summary_content;
-        }
-
-        $formatted_files[] = [
-            'id' => $file['id'],
-            'name' => $file['file_name'],
-            'subject' => $file['subject'],
-            'date' => $file['date'],
-            'summary' => $summary_content,
-            'full_summary' => $full_summary,
-            'language' => $file_language,
-            'status' => 'completed',
-            'debug_info' => '',
-            'extracted_text' => '',
-            'summary_file_path' => $file['summary_file_path'],
-            'original_file_path' => $file['original_file_path']
+    if (empty($api_key) || $api_key === 'your_api_key_here') {
+        return [
+            'success' => false,
+            'http_code' => 0,
+            'response' => 'API key not configured'
         ];
     }
 
-    return $formatted_files;
-}
+    $test_request = [
+        'model' => 'claude-3-5-sonnet-20241022',
+        'max_tokens' => 100,
+        'messages' => [
+            [
+                'role' => 'user',
+                'content' => 'Respond with just "API connection successful"'
+            ]
+        ]
+    ];
 
-// UPDATED: Create enhanced summary text file with better formatting for structured content
-function createSummaryTextFile($summary_content, $original_filename, $user_id, $subject, $language = 'en', $alt_summary = '')
-{
-    $summary_dir = "uploads/user_$user_id/$subject/summaries/";
+    $ch = curl_init();
+    curl_setopt_array($ch, [
+        CURLOPT_URL => "https://api.anthropic.com/v1/messages",
+        CURLOPT_POST => true,
+        CURLOPT_HTTPHEADER => [
+            'Content-Type: application/json',
+            'x-api-key: ' . $api_key,
+            'anthropic-version: 2023-06-01'
+        ],
+        CURLOPT_POSTFIELDS => json_encode($test_request),
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_TIMEOUT => 30,
+        CURLOPT_CONNECTTIMEOUT => 10,
+        CURLOPT_SSL_VERIFYPEER => false // For testing only
+    ]);
 
-    if (!file_exists($summary_dir)) {
-        mkdir($summary_dir, 0755, true);
+    $response = curl_exec($ch);
+    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $curl_error = curl_error($ch);
+    curl_close($ch);
+
+    if ($curl_error) {
+        return [
+            'success' => false,
+            'http_code' => 0,
+            'response' => 'cURL Error: ' . $curl_error
+        ];
     }
 
-    $summary_filename = pathinfo($original_filename, PATHINFO_FILENAME) . '_summary.txt';
-    $summary_path = $summary_dir . $summary_filename;
+    return [
+        'success' => $http_code === 200,
+        'http_code' => $http_code,
+        'response' => $response
+    ];
+}
 
-    // Create enhanced content with better formatting
-    $file_content = "📄 DOCUMENT ANALYSIS SUMMARY\n";
-    $file_content .= str_repeat("=", 50) . "\n\n";
+// Add this test code right after the require_once statements at the top
+if (isset($_GET['test_claude_api'])) {
+    echo "<!DOCTYPE html><html><head><title>Claude API Test</title></head><body>";
+    echo "<h2>🧪 Claude API Connection Test</h2>";
 
-    // Add document info
-    $file_content .= "📋 Document: " . $original_filename . "\n";
-    $file_content .= "📚 Subject: " . $subject . "\n";
-    $file_content .= "🌐 Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
-    $file_content .= "📅 Generated: " . date('Y-m-d H:i:s') . "\n\n";
+    $test_result = testClaudeAPIConnection();
 
-    $file_content .= str_repeat("-", 50) . "\n\n";
+    echo "<div style='background: #f5f5f5; padding: 20px; border-radius: 8px; font-family: monospace;'>";
+    echo "<h3>Test Results:</h3>";
+    echo "<strong>HTTP Code:</strong> " . $test_result['http_code'] . "<br>";
+    echo "<strong>Success:</strong> " . ($test_result['success'] ? '✅ YES' : '❌ NO') . "<br>";
+    echo "<strong>API Key Status:</strong> " . (empty(CLAUDE_API_KEY) ? '❌ Missing' : '✅ Present') . "<br>";
 
-    // Add main summary with better formatting
-    $file_content .= "🤖 AI ANALYSIS:\n\n";
+    if (!$test_result['success']) {
+        echo "<br><strong>Error Details:</strong><br>";
+        echo "<pre style='background: #ffe6e6; padding: 10px; border-radius: 4px;'>";
 
-    // Clean up and format the summary content
-    $formatted_summary = $summary_content;
-
-    // Replace bullet points with better formatting
-    $formatted_summary = str_replace('•', '  •', $formatted_summary);
-
-    // Add proper spacing around sections
-    $formatted_summary = preg_replace('/\[([^\]]+)\]:/', "\n📌 $1:", $formatted_summary);
-
-    $file_content .= $formatted_summary . "\n\n";
-
-    // Add alternative language summary if available
-    if (!empty($alt_summary)) {
-        $separator = "\n" . str_repeat("-", 50) . "\n\n";
-        if ($language === 'th') {
-            $file_content .= $separator . "🇺🇸 ENGLISH SUMMARY:\n\n" . $alt_summary . "\n\n";
+        // Try to decode JSON error response
+        $error_response = json_decode($test_result['response'], true);
+        if ($error_response && isset($error_response['error'])) {
+            echo "Error Type: " . ($error_response['error']['type'] ?? 'unknown') . "\n";
+            echo "Error Message: " . ($error_response['error']['message'] ?? 'unknown') . "\n";
         } else {
-            $file_content .= $separator . "🇹🇭 สรุปภาษาไทย:\n\n" . $alt_summary . "\n\n";
+            echo htmlspecialchars($test_result['response']);
+        }
+        echo "</pre>";
+
+        // Provide troubleshooting guidance
+        echo "<br><h3>🔧 Troubleshooting:</h3>";
+        echo "<ul>";
+
+        switch ($test_result['http_code']) {
+            case 0:
+                echo "<li><strong>Connection Error:</strong> Check your internet connection and firewall settings</li>";
+                break;
+            case 400:
+                echo "<li><strong>Bad Request:</strong> Check your API request format or model name</li>";
+                break;
+            case 401:
+                echo "<li><strong>Unauthorized:</strong> Your API key is invalid or expired</li>";
+                echo "<li>Go to <a href='https://console.anthropic.com' target='_blank'>Anthropic Console</a> to check your API key</li>";
+                break;
+            case 403:
+                echo "<li><strong>Forbidden:</strong> Your API key doesn't have permission to access Claude API</li>";
+                break;
+            case 429:
+                echo "<li><strong>Rate Limited:</strong> You've exceeded the API rate limits</li>";
+                break;
+            case 500:
+            case 502:
+            case 503:
+            case 504:
+                echo "<li><strong>Server Error:</strong> Anthropic's servers are having issues, try again later</li>";
+                break;
+            default:
+                echo "<li><strong>Unknown Error:</strong> HTTP " . $test_result['http_code'] . "</li>";
+        }
+
+        echo "</ul>";
+    } else {
+        echo "<br><h3>✅ Connection Successful!</h3>";
+        echo "<p>Your Claude API is working correctly.</p>";
+
+        // Show actual response
+        $response_data = json_decode($test_result['response'], true);
+        if ($response_data && isset($response_data['content'][0]['text'])) {
+            echo "<strong>Claude Response:</strong> " . htmlspecialchars($response_data['content'][0]['text']) . "<br>";
         }
     }
 
-    // Add metadata footer
-    $file_content .= str_repeat("=", 50) . "\n";
-    $file_content .= "📊 TECHNICAL INFO:\n";
-    $file_content .= "  • OCR Technology: Tesseract OCR Engine\n";
-    $file_content .= "  • AI Analysis: Claude (Anthropic)\n";
-    $file_content .= "  • Processing Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
-    $file_content .= "  • File Size: " . (file_exists($original_filename) ? formatFileSize(filesize($original_filename)) : 'Unknown') . "\n";
-    $file_content .= str_repeat("=", 50) . "\n";
-
-    file_put_contents($summary_path, $file_content);
-
-    return $summary_path;
+    echo "</div>";
+    echo "<br><a href='dashboard.php' style='background: #4CAF50; color: white; padding: 10px 20px; text-decoration: none; border-radius: 4px;'>← Back to Dashboard</a>";
+    echo "</body></html>";
+    exit;
 }
 
-// Helper function to format file sizes
-function formatFileSize($bytes, $precision = 2)
-{
-    $units = array('B', 'KB', 'MB', 'GB', 'TB');
 
-    for ($i = 0; $bytes > 1024; $i++) {
-        $bytes /= 1024;
-    }
-
-    return round($bytes, $precision) . ' ' . $units[$i];
-}
 
 // Create user-specific folder structure
 function createUserFolderStructure($user_id)
@@ -388,611 +423,539 @@ if (!function_exists('mb_ord')) {
     }
 }
 
-// UPDATED: Enhanced performOCR function using Tesseract OCR directly
-function performOCR($file_path)
-{
-    $debug_info = [];
-    $debug_info['method'] = 'Direct Tesseract OCR';
-
-    // Validate file exists and is readable
-    if (!file_exists($file_path)) {
-        error_log("OCR file not found: " . $file_path);
-        return ['error' => 'File not found', 'text' => false, 'debug' => 'File path invalid'];
-    }
-
-    if (!is_readable($file_path)) {
-        error_log("OCR file not readable: " . $file_path);
-        return ['error' => 'File not readable', 'text' => false, 'debug' => 'File permissions issue'];
-    }
-
-    // Check file size (reasonable limit for local processing)
-    $file_size = filesize($file_path);
-    if ($file_size > 50 * 1024 * 1024) { // 50MB limit
-        error_log("OCR file too large: " . $file_size . " bytes");
-        return ['error' => 'File too large for OCR processing', 'text' => false, 'debug' => 'File exceeds 50MB limit'];
-    }
-
-    // Check file type - Tesseract supports PDF directly!
-    $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-    $allowed_extensions = ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp', 'pdf'];
-    if (!in_array($file_extension, $allowed_extensions)) {
-        error_log("OCR unsupported file type: " . $file_extension);
-        return ['error' => 'Unsupported file type for OCR', 'text' => false, 'debug' => 'File type not supported'];
-    }
-
-    try {
-        // Create temporary output file
-        $temp_output = TESSERACT_TEMP_DIR . '/tesseract_output_' . uniqid();
-        
-        // Detect language from filename or use auto-detection
-        $detected_language = detectLanguageFromFilename($file_path);
-        $language_param = $detected_language === 'th' ? TESSERACT_LANG_THAI : TESSERACT_LANG_DEFAULT;
-        
-        // Add both languages for better results
-        $language_param = TESSERACT_LANG_DEFAULT . '+' . TESSERACT_LANG_THAI;
-        
-        // Build Tesseract command - DIRECT PROCESSING (works for PDF and images!)
-        $cmd = sprintf(
-            '%s "%s" "%s" -l %s --psm 1 --oem 3 2>&1',
-            TESSERACT_CMD,
-            escapeshellarg($file_path),
-            escapeshellarg($temp_output),
-            $language_param
-        );
-
-        $debug_info['command'] = $cmd;
-        $debug_info['language'] = $language_param;
-        $debug_info['file_type'] = $file_extension;
-
-        error_log("Tesseract OCR Command: " . $cmd);
-
-        // Execute Tesseract command
-        $output = shell_exec($cmd);
-        $debug_info['shell_output'] = $output;
-
-        // Read the output file
-        $output_file = $temp_output . '.txt';
-        if (file_exists($output_file)) {
-            $extracted_text = file_get_contents($output_file);
-            
-            // Clean up temporary files
-            unlink($output_file);
-
-            // Validate extracted text
-            $extracted_text = trim($extracted_text);
-            if (!empty($extracted_text) && strlen($extracted_text) > 5) {
-                $word_count = str_word_count($extracted_text);
-                $char_count = mb_strlen($extracted_text, 'UTF-8');
-                
-                error_log("Tesseract OCR Success - Extracted {$word_count} words, {$char_count} characters");
-                
-                return [
-                    'error' => null,
-                    'text' => $extracted_text,
-                    'debug' => "Tesseract OCR successful - {$word_count} words, {$char_count} characters extracted",
-                    'language_detected' => $detected_language
-                ];
-            } else {
-                error_log("Tesseract returned empty or minimal text");
-                return ['error' => 'No meaningful text found in document', 'text' => false, 'debug' => 'Minimal OCR result'];
-            }
-        } else {
-            error_log("Tesseract output file not created: " . $output_file);
-            return ['error' => 'Tesseract processing failed', 'text' => false, 'debug' => 'No output file created: ' . $output];
-        }
-    } catch (Exception $e) {
-        // Clean up on error
-        if (isset($temp_output) && file_exists($temp_output . '.txt')) {
-            unlink($temp_output . '.txt');
-        }
-
-        error_log("Tesseract OCR Exception: " . $e->getMessage());
-        return ['error' => 'OCR processing exception: ' . $e->getMessage(), 'text' => false, 'debug' => 'Exception occurred'];
-    }
-}
-
-// Helper function to detect language from filename
-function detectLanguageFromFilename($filename)
-{
-    $basename = basename($filename);
-    // Simple heuristic: look for Thai characters in filename
-    if (preg_match('/[\x{0E00}-\x{0E7F}]/u', $basename)) {
-        return 'th';
-    }
-    return 'en';
-}
-
-// UPDATED: Simplified PDF processing function using Tesseract directly
-function extractTextFromPDF($file_path)
-{
-    error_log("PDF processing: Using direct Tesseract approach");
-
-    // Method 1: Try pdftotext (fastest for text-based PDFs)
-    $content = shell_exec("pdftotext '$file_path' -");
-    if ($content && strlen(trim($content)) > 50) {
-        error_log("PDF text extraction: pdftotext successful, " . strlen($content) . " characters");
-        return trim($content);
-    }
-
-    error_log("PDF text extraction: pdftotext failed, trying direct Tesseract OCR");
-
-    // Method 2: Use Tesseract directly on PDF (no ImageMagick needed!)
-    $ocr_result = performOCR($file_path);
-    if ($ocr_result['text']) {
-        error_log("PDF text extraction: Direct Tesseract successful, " . strlen($ocr_result['text']) . " characters");
-        return $ocr_result['text'];
-    }
-
-    // Both methods failed
-    error_log("PDF text extraction: All methods failed");
-    return false;
-}
-
-// UPDATED: Analyze with Claude - Enhanced with multilingual language detection
-function analyzeWithClaude($text_content, $filename)
+/**
+ * Enhanced function using Claude for both OCR and NLP analysis
+ */
+function processWithClaudeOCRandNLP($file_path, $filename)
 {
     $api_key = CLAUDE_API_KEY;
 
     if (empty($api_key)) {
         return [
             'subject' => 'Others',
-            'summary' => 'AI API key not configured',
+            'summary' => 'Claude API key not configured',
             'debug' => 'API key missing',
-            'language' => 'en'
+            'language' => 'en',
+            'extracted_text' => ''
         ];
     }
 
-    if (empty(trim($text_content))) {
+    // Validate file
+    if (!file_exists($file_path) || !is_readable($file_path)) {
         return [
             'subject' => 'Others',
-            'summary' => 'No text content to analyze',
-            'debug' => 'Empty text content',
-            'language' => 'en'
+            'summary' => 'File not found or not readable',
+            'debug' => 'File access error: ' . $file_path,
+            'language' => 'en',
+            'extracted_text' => ''
         ];
     }
 
-    // Truncate very long text to avoid API limits
-    $max_length = 15000; // Reasonable limit for Claude API
-    if (strlen($text_content) > $max_length) {
-        $text_content = substr($text_content, 0, $max_length) . "\n[Content truncated for analysis...]";
-        error_log("Text content truncated to $max_length characters for AI analysis");
+    // Check file size (15MB limit for base64 encoding)
+    $file_size = filesize($file_path);
+    $max_size = 15 * 1024 * 1024; // 15MB
+
+    if ($file_size > $max_size) {
+        return [
+            'subject' => 'Others',
+            'summary' => 'File too large for Claude processing (max 15MB)',
+            'debug' => "File size: " . round($file_size / (1024 * 1024), 2) . "MB exceeds 15MB limit",
+            'language' => 'en',
+            'extracted_text' => ''
+        ];
     }
 
-    $url = "https://api.anthropic.com/v1/messages";
+    $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
 
-    // Enhanced prompt with detailed summary structure, bullet points, and keywords
-    $prompt = "Please analyze the following educational document. First detect the primary language of the content, then provide a comprehensive structured analysis in that same language.
+    // FIXED: Only support image formats that Claude Vision API actually supports
+    $supported_image_types = [
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp'
+    ];
 
-**Document:** $filename
-**Content:** 
-$text_content
+    // FIXED: Handle PDF files separately (Claude doesn't support PDFs directly)
+    if ($file_extension === 'pdf') {
+        return [
+            'subject' => 'Others',
+            'summary' => 'PDF files are not supported by Claude Vision API. Please convert to JPG/PNG first, or use a different processing method.',
+            'debug' => 'PDF files cannot be processed by Claude Vision API',
+            'language' => 'en',
+            'extracted_text' => ''
+        ];
+    }
 
-**Instructions:**
-1. **Language Detection**: Determine if the content is primarily in Thai (ภาษาไทย) or English
-2. **Subject Classification**: Choose the most appropriate category from: Physics, Biology, Chemistry, Mathematics, Others
-3. **Detailed Structured Summary**: Create a comprehensive analysis with multiple components
+    // Check if file type is supported
+    if (!isset($supported_image_types[$file_extension])) {
+        return [
+            'subject' => 'Others',
+            'summary' => 'Unsupported file type. Supported formats: JPG, PNG, GIF, WebP',
+            'debug' => 'Unsupported extension: ' . $file_extension,
+            'language' => 'en',
+            'extracted_text' => ''
+        ];
+    }
 
-**Analysis Guidelines:**
-- Focus on educational value and learning objectives
-- Extract specific subtopics, concepts, and terminology
-- Identify equations, formulas, diagrams, or data mentioned
-- Note experimental procedures, problem-solving methods, or case studies
-- Highlight key terms, definitions, and important concepts
-- Consider practical applications and real-world connections
-- Identify difficulty level and target audience
+    $media_type = $supported_image_types[$file_extension];
 
-**Response Format (JSON only):**
-If the content is primarily in Thai, respond like this:
+    // Read and encode file with error handling
+    try {
+        $file_content = file_get_contents($file_path);
+        if ($file_content === false) {
+            throw new Exception("Could not read file content");
+        }
+
+        $file_data = base64_encode($file_content);
+        if ($file_data === false) {
+            throw new Exception("Could not encode file to base64");
+        }
+
+        // Check encoded size (base64 increases size by ~33%)
+        if (strlen($file_data) > 20 * 1024 * 1024) {
+            throw new Exception("Encoded file too large for API");
+        }
+    } catch (Exception $e) {
+        return [
+            'subject' => 'Others',
+            'summary' => 'Error reading file: ' . $e->getMessage(),
+            'debug' => 'File processing error: ' . $e->getMessage(),
+            'language' => 'en',
+            'extracted_text' => ''
+        ];
+    }
+
+    // FIXED: Improved prompt with clearer instructions
+    $prompt = "Analyze this image document. Extract text and provide educational analysis.
+
+Document: {$filename}
+
+Tasks:
+1. Extract ALL visible text exactly as shown
+2. Detect language (Thai or English) 
+3. Classify subject: Physics, Biology, Chemistry, Mathematics, Others
+4. Create educational summary in detected language
+
+Respond with ONLY valid JSON in this format:
+
+For Thai content:
 {
     \"language\": \"th\",
-    \"subject\": \"[Subject Category in English]\",
-    \"summary\": \"[หัวข้อหลัก]: สรุปเนื้อหาหลักของเอกสาร (2-3 ประโยค)\\n\\n[แนวคิดสำคัญ]:\\n• แนวคิดที่ 1: คำอธิบายสั้นๆ\\n• แนวคิดที่ 2: คำอธิบายสั้นๆ\\n• แนวคิดที่ 3: คำอธิบายสั้นๆ\\n\\n[คำศัพท์สำคัญ]: คำศัพท์1, คำศัพท์2, คำศัพท์3, คำศัพท์4\\n\\n[การประยุกต์ใช้]: อธิบายการนำไปใช้จริงหรือความสำคัญทางการศึกษา\",
-    \"summary_en\": \"[Brief English summary for reference]\"
+    \"subject\": \"Physics\",
+    \"extracted_text\": \"[all text from image]\",
+    \"summary\": \"หัวข้อ: [topic]\\n\\nสาระสำคัญ:\\n• [point 1]\\n• [point 2]\\n\\nคำศัพท์: [keywords]\",
+    \"summary_en\": \"[brief English summary]\"
 }
 
-If the content is primarily in English, respond like this:
+For English content:
 {
-    \"language\": \"en\",
-    \"subject\": \"[Subject Category]\",
-    \"summary\": \"[Main Topic]: Brief overview of the document's primary focus (2-3 sentences)\\n\\n[Key Concepts]:\\n• Concept 1: Brief explanation\\n• Concept 2: Brief explanation\\n• Concept 3: Brief explanation\\n\\n[Important Keywords]: keyword1, keyword2, keyword3, keyword4\\n\\n[Applications/Significance]: Practical applications or educational importance\",
-    \"summary_th\": \"[สรุปสั้นๆ เป็นภาษาไทยเพื่ออ้างอิง]\"
-}
+    \"language\": \"en\", 
+    \"subject\": \"Physics\",
+    \"extracted_text\": \"[all text from image]\",
+    \"summary\": \"Topic: [topic]\\n\\nKey Points:\\n• [point 1]\\n• [point 2]\\n\\nKeywords: [keywords]\",
+    \"summary_th\": \"[brief Thai summary]\"
+}";
 
-**Important Notes**: 
-- Always provide the summary in the primary language of the source content
-- Use bullet points (•) for key concepts to improve readability
-- Include 3-5 key concepts maximum
-- Extract 4-6 most important keywords/terms
-- Subject category should always be in English for consistency
-- Keep each bullet point concise but informative (10-15 words max)
-- Focus on educational content that would help students understand the material";
-
+    // FIXED: Updated request structure with proper error handling
     $request_data = [
-        'model' => 'claude-3-5-sonnet-20241022',
-        'max_tokens' => 800, // Increased for multilingual responses
+        'model' => 'claude-3-5-sonnet-20241022', // FIXED: Use confirmed working model
+        'max_tokens' => 1500,
         'messages' => [
             [
                 'role' => 'user',
-                'content' => $prompt
+                'content' => [
+                    [
+                        'type' => 'text',
+                        'text' => $prompt
+                    ],
+                    [
+                        'type' => 'image',
+                        'source' => [
+                            'type' => 'base64',
+                            'media_type' => $media_type,
+                            'data' => $file_data
+                        ]
+                    ]
+                ]
             ]
         ]
     ];
 
-    // Retry mechanism for handling API overload
+    // Add detailed logging for debugging
+    error_log("=== CLAUDE API REQUEST DEBUG ===");
+    error_log("File: $filename");
+    error_log("Size: " . round($file_size / 1024, 2) . " KB");
+    error_log("Type: $media_type");
+    error_log("Base64 size: " . round(strlen($file_data) / 1024, 2) . " KB");
+
+    return makeClaudeAPIRequest($request_data, $api_key, $filename);
+}
+
+// FIXED: Improved API request function with better error handling
+function makeClaudeAPIRequest($request_data, $api_key, $filename)
+{
+    $url = "https://api.anthropic.com/v1/messages";
     $max_retries = 3;
-    $base_delay = 2; // seconds
+    $base_delay = 2;
 
     for ($attempt = 1; $attempt <= $max_retries; $attempt++) {
-        error_log("AI API attempt $attempt of $max_retries for file: $filename");
+        error_log("Claude API attempt $attempt for: $filename");
 
         $ch = curl_init();
-        curl_setopt($ch, CURLOPT_URL, $url);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'x-api-key: ' . $api_key,
-            'anthropic-version: 2023-06-01'
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url,
+            CURLOPT_POST => true,
+            CURLOPT_HTTPHEADER => [
+                'Content-Type: application/json',
+                'x-api-key: ' . $api_key,
+                'anthropic-version: 2023-06-01'
+            ],
+            CURLOPT_POSTFIELDS => json_encode($request_data),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT => 120,
+            CURLOPT_CONNECTTIMEOUT => 30,
+            CURLOPT_SSL_VERIFYPEER => true, // FIXED: Enable SSL verification
+            CURLOPT_USERAGENT => 'OZNOTE/1.0',
+            CURLOPT_VERBOSE => false // Set to true for debugging
         ]);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($request_data));
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_TIMEOUT, 60); // Increased timeout
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 15);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-        curl_setopt($ch, CURLOPT_USERAGENT, 'StudyOrganizer/1.0');
 
         $response = curl_exec($ch);
         $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $curl_error = curl_error($ch);
+
+        // FIXED: Better error logging
+        if ($curl_error) {
+            error_log("cURL Error (attempt $attempt): $curl_error");
+        }
+
+        if ($http_code !== 200) {
+            error_log("HTTP Error $http_code: " . substr($response, 0, 200));
+        }
+
         curl_close($ch);
 
-        error_log("AI API attempt $attempt - HTTP Code: $http_code");
-
+        // Handle cURL errors
         if ($curl_error) {
-            error_log("AI CURL Error on attempt $attempt: " . $curl_error);
             if ($attempt === $max_retries) {
                 return [
                     'subject' => 'Others',
-                    'summary' => 'Network error connecting to AI API after ' . $max_retries . ' attempts: ' . $curl_error,
-                    'debug' => 'CURL Error after retries: ' . $curl_error,
-                    'language' => 'en'
+                    'summary' => 'Network connection error',
+                    'debug' => 'cURL Error: ' . $curl_error,
+                    'language' => 'en',
+                    'extracted_text' => ''
                 ];
             }
-            // Wait before retry
             sleep($base_delay * $attempt);
             continue;
         }
 
-        // Handle successful response
-        if ($http_code === 200) {
-            $result = json_decode($response, true);
-            if (isset($result['content'][0]['text'])) {
-                $claude_response = $result['content'][0]['text'];
-
-                // Try to extract JSON from the response
-                preg_match('/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/', $claude_response, $matches);
-                if ($matches) {
-                    $analysis = json_decode($matches[0], true);
-                    if ($analysis && isset($analysis['subject']) && isset($analysis['summary'])) {
-                        // Validate subject category
-                        $valid_subjects = ['Physics', 'Biology', 'Chemistry', 'Mathematics', 'Others'];
-                        if (!in_array($analysis['subject'], $valid_subjects)) {
-                            $analysis['subject'] = 'Others';
-                        }
-
-                        // Get detected language (default to English if not specified)
-                        $detected_language = isset($analysis['language']) ? $analysis['language'] : 'en';
-
-                        // Prepare the main summary and alternative language summary
-                        $main_summary = $analysis['summary'];
-                        $alt_summary = '';
-
-                        if ($detected_language === 'th' && isset($analysis['summary_en'])) {
-                            $alt_summary = $analysis['summary_en'];
-                        } elseif ($detected_language === 'en' && isset($analysis['summary_th'])) {
-                            $alt_summary = $analysis['summary_th'];
-                        }
-
-                        error_log("AI analysis successful on attempt $attempt - Language: $detected_language");
-                        return [
-                            'subject' => $analysis['subject'],
-                            'summary' => $main_summary,
-                            'summary_alt' => $alt_summary,
-                            'language' => $detected_language,
-                            'debug' => "AI analysis successful on attempt $attempt - Enhanced multilingual summary generated"
-                        ];
-                    }
+        // Handle HTTP errors with specific messages
+        if ($http_code !== 200) {
+            $error_details = '';
+            if ($response) {
+                $error_response = json_decode($response, true);
+                if (isset($error_response['error']['message'])) {
+                    $error_details = $error_response['error']['message'];
                 }
+            }
 
-                // Enhanced fallback parsing method with structured content support
-                $detected_language = detectLanguageFromContent($text_content);
-                $lines = explode("\n", $claude_response);
-                $subject = 'Others';
-                $summary = ($detected_language === 'th')
-                    ? '[หัวข้อหลัก]: เอกสารได้รับการวิเคราะห์เรียบร้อยแล้ว\n\n[แนวคิดสำคัญ]:\n• เนื้อหาได้รับการประมวลผลและจัดหมวดหมู่แล้ว\n• ระบบ AI ได้ทำการวิเคราะห์เอกสารเรียบร้อย\n\n[คำศัพท์สำคัญ]: วิเคราะห์, จัดหมวดหมู่, เอกสาร\n\n[การประยุกต์ใช้]: เอกสารพร้อมสำหรับการศึกษาและอ้างอิง'
-                    : '[Main Topic]: Document analyzed successfully\n\n[Key Concepts]:\n• Content has been processed and categorized\n• AI analysis completed successfully\n• Document ready for educational use\n\n[Important Keywords]: analysis, categorization, document, education\n\n[Applications/Significance]: Document is ready for study and reference purposes';
-
-                // Try to extract subject and summary from fallback response
-                foreach ($lines as $line) {
-                    if (stripos($line, 'subject') !== false && stripos($line, ':') !== false) {
-                        $parts = explode(':', $line, 2);
-                        if (count($parts) > 1) {
-                            $extracted_subject = trim(str_replace(['"', "'", '}', '{'], '', $parts[1]));
-                            $valid_subjects = ['Physics', 'Biology', 'Chemistry', 'Mathematics', 'Others'];
-                            if (in_array($extracted_subject, $valid_subjects)) {
-                                $subject = $extracted_subject;
-                            }
-                        }
+            // FIXED: More specific error messages
+            switch ($http_code) {
+                case 400:
+                    return [
+                        'subject' => 'Others',
+                        'summary' => 'Invalid request format. This usually means the file type or size is not supported.',
+                        'debug' => "HTTP 400 - Bad Request: $error_details",
+                        'language' => 'en',
+                        'extracted_text' => ''
+                    ];
+                case 401:
+                    return [
+                        'subject' => 'Others',
+                        'summary' => 'Invalid Claude API key. Please check your API key.',
+                        'debug' => "HTTP 401 - Unauthorized: $error_details",
+                        'language' => 'en',
+                        'extracted_text' => ''
+                    ];
+                case 403:
+                    return [
+                        'subject' => 'Others',
+                        'summary' => 'API access forbidden. Check your subscription or permissions.',
+                        'debug' => "HTTP 403 - Forbidden: $error_details",
+                        'language' => 'en',
+                        'extracted_text' => ''
+                    ];
+                case 413:
+                    return [
+                        'subject' => 'Others',
+                        'summary' => 'File too large for Claude API.',
+                        'debug' => "HTTP 413 - Payload Too Large: $error_details",
+                        'language' => 'en',
+                        'extracted_text' => ''
+                    ];
+                case 429:
+                    if ($attempt < $max_retries) {
+                        $wait_time = $base_delay * pow(2, $attempt);
+                        error_log("Rate limited, waiting {$wait_time}s...");
+                        sleep($wait_time);
+                        continue;
                     }
-                    if (stripos($line, 'summary') !== false && stripos($line, ':') !== false) {
-                        $parts = explode(':', $line, 2);
-                        if (count($parts) > 1) {
-                            $extracted_summary = trim(str_replace(['"', "'", '}'], '', $parts[1]));
-                            if (strlen($extracted_summary) > 20) { // Only use if we got a meaningful summary
-                                // Try to structure the extracted summary
-                                if (!strpos($extracted_summary, '[') && !strpos($extracted_summary, '•')) {
-                                    // Convert plain text to structured format
-                                    $structured_summary = ($detected_language === 'th')
-                                        ? "[หัวข้อหลัก]: $extracted_summary\n\n[แนวคิดสำคัญ]:\n• ข้อมูลหลักจากการวิเคราะห์\n• เนื้อหาที่สำคัญของเอกสาร\n\n[คำศัพท์สำคัญ]: การศึกษา, เอกสาร, ข้อมูล\n\n[การประยุกต์ใช้]: นำไปใช้ในการศึกษาและอ้างอิง"
-                                        : "[Main Topic]: $extracted_summary\n\n[Key Concepts]:\n• Primary information from analysis\n• Important content from document\n\n[Important Keywords]: education, document, information\n\n[Applications/Significance]: Useful for study and reference";
-                                    $summary = $structured_summary;
-                                } else {
-                                    $summary = $extracted_summary;
-                                }
-                                break;
-                            }
-                        }
+                    return [
+                        'subject' => 'Others',
+                        'summary' => 'API rate limit exceeded. Please try again later.',
+                        'debug' => "HTTP 429 - Rate Limited: $error_details",
+                        'language' => 'en',
+                        'extracted_text' => ''
+                    ];
+                case 500:
+                case 502:
+                case 503:
+                case 504:
+                    if ($attempt < $max_retries) {
+                        $wait_time = $base_delay * $attempt;
+                        error_log("Server error, retrying in {$wait_time}s...");
+                        sleep($wait_time);
+                        continue;
                     }
-                }
-
-                return [
-                    'subject' => $subject,
-                    'summary' => $summary,
-                    'language' => $detected_language,
-                    'debug' => "AI response parsed with fallback method on attempt $attempt"
-                ];
+                    break;
             }
-        }
-
-        // Handle retryable errors (overload, rate limits, server errors)
-        if (in_array($http_code, [429, 500, 502, 503, 504, 529])) {
-            $error_response = json_decode($response, true);
-            $error_message = 'API temporarily unavailable';
-
-            if (isset($error_response['error']['message'])) {
-                $error_message = $error_response['error']['message'];
-            }
-
-            error_log("AI API retryable error on attempt $attempt: HTTP $http_code - $error_message");
-
-            if ($attempt < $max_retries) {
-                // Exponential backoff: wait longer for each retry
-                $wait_time = $base_delay * pow(2, $attempt - 1);
-                error_log("Waiting {$wait_time} seconds before retry...");
-                sleep($wait_time);
-                continue;
-            } else {
-                // Final attempt failed - provide message in appropriate language
-                $detected_language = detectLanguageFromContent($text_content);
-                $error_summary = ($detected_language === 'th')
-                    ? "อัพโหลดเอกสารเรียบร้อยแล้ว AI กำลังใช้งานหนัก (HTTP $http_code) เอกสารได้รับการบันทึกแล้วและสามารถวิเคราะห์ใหม่ได้ในภายหลังเมื่อพร้อมใช้งาน"
-                    : "Document uploaded successfully. AI is temporarily overloaded (HTTP $http_code). The document has been saved and can be re-analyzed later when the service is available.";
-
-                return [
-                    'subject' => 'Others',
-                    'summary' => $error_summary,
-                    'language' => $detected_language,
-                    'debug' => "HTTP $http_code after $max_retries attempts: $error_message"
-                ];
-            }
-        }
-
-        // Handle non-retryable errors (auth, etc.)
-        else {
-            $error_response = json_decode($response, true);
-            $error_message = 'Unknown API error';
-
-            if (isset($error_response['error']['message'])) {
-                $error_message = $error_response['error']['message'];
-            }
-
-            error_log("AI API non-retryable error: HTTP $http_code - $error_message");
-
-            $detected_language = detectLanguageFromContent($text_content);
-            $error_summary = ($detected_language === 'th')
-                ? "อัพโหลดเอกสารเรียบร้อยแล้ว เกิดข้อผิดพลาด AI API (HTTP $http_code): $error_message"
-                : "Document uploaded successfully. AI API error (HTTP $http_code): $error_message";
 
             return [
                 'subject' => 'Others',
-                'summary' => $error_summary,
-                'language' => $detected_language,
-                'debug' => "HTTP $http_code (non-retryable): $error_message"
+                'summary' => "Claude API error (HTTP $http_code). Please try again later.",
+                'debug' => "HTTP $http_code: $error_details",
+                'language' => 'en',
+                'extracted_text' => ''
             ];
         }
-    }
 
-    // Should not reach here, but just in case
-    $detected_language = detectLanguageFromContent($text_content);
-    $fallback_summary = ($detected_language === 'th')
-        ? 'อัพโหลดเอกสารเรียบร้อยแล้ว แต่การวิเคราะห์ AI ล้มเหลวหลังจากการพยายามหลายครั้ง'
-        : 'Document uploaded successfully but AI analysis failed after multiple attempts.';
+        // Success - parse response
+        return parseClaudeResponse($response, $filename);
+    }
 
     return [
         'subject' => 'Others',
-        'summary' => $fallback_summary,
-        'language' => $detected_language,
-        'debug' => 'All retry attempts exhausted'
+        'summary' => 'All retry attempts failed',
+        'debug' => 'Exhausted all retries',
+        'language' => 'en',
+        'extracted_text' => ''
     ];
 }
 
-// UPDATED: Process uploaded file with simplified Tesseract OCR
+// FIXED: Better JSON parsing
+function parseClaudeResponse($response, $filename)
+{
+    $result = json_decode($response, true);
+
+    if (!$result || !isset($result['content'][0]['text'])) {
+        error_log("Invalid API response structure for: $filename");
+        return [
+            'subject' => 'Others',
+            'summary' => 'Invalid response from Claude API',
+            'debug' => 'Malformed API response structure',
+            'language' => 'en',
+            'extracted_text' => ''
+        ];
+    }
+
+    $claude_response = $result['content'][0]['text'];
+    error_log("Claude response received, length: " . strlen($claude_response));
+
+    // FIXED: Better JSON extraction
+    // Try to find JSON in the response
+    if (preg_match('/\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/', $claude_response, $matches)) {
+        $json_str = $matches[0];
+        $analysis = json_decode($json_str, true);
+
+        if ($analysis && isset($analysis['subject'], $analysis['summary'], $analysis['extracted_text'])) {
+            // Validate subject
+            $valid_subjects = ['Physics', 'Biology', 'Chemistry', 'Mathematics', 'Others'];
+            if (!in_array($analysis['subject'], $valid_subjects)) {
+                $analysis['subject'] = 'Others';
+            }
+
+            $detected_language = $analysis['language'] ?? 'en';
+            $main_summary = $analysis['summary'] ?? 'No summary available';
+            $alt_summary = '';
+
+            if ($detected_language === 'th' && isset($analysis['summary_en'])) {
+                $alt_summary = $analysis['summary_en'];
+            } elseif ($detected_language === 'en' && isset($analysis['summary_th'])) {
+                $alt_summary = $analysis['summary_th'];
+            }
+
+            error_log("Successfully parsed Claude response for: $filename (Language: $detected_language)");
+
+            return [
+                'subject' => $analysis['subject'],
+                'summary' => $main_summary,
+                'summary_alt' => $alt_summary,
+                'language' => $detected_language,
+                'extracted_text' => $analysis['extracted_text'] ?? '',
+                'debug' => 'Successfully processed - ' . strlen($analysis['extracted_text'] ?? '') . ' characters extracted'
+            ];
+        }
+
+        error_log("JSON found but missing required fields in response for: $filename");
+    } else {
+        error_log("No valid JSON found in Claude response for: $filename");
+    }
+
+    // Fallback parsing
+    $detected_language = (strpos($claude_response, 'ภาษาไทย') !== false ||
+        preg_match('/[\x{0E00}-\x{0E7F}]/u', $claude_response)) ? 'th' : 'en';
+
+    return [
+        'subject' => 'Others',
+        'summary' => ($detected_language === 'th')
+            ? 'ประมวลผลเอกสารแล้ว แต่การแยกข้อมูลล้มเหลว'
+            : 'Document processed but data extraction failed',
+        'language' => $detected_language,
+        'extracted_text' => substr($claude_response, 0, 500),
+        'debug' => 'Fallback parsing used - JSON extraction failed'
+    ];
+}
+
+// FIXED: Updated processUploadedFile to handle errors better
 function processUploadedFile($uploaded_file)
 {
-    $debug_info = [];
-    $debug_info['function_start'] = 'processUploadedFile started - SIMPLIFIED TESSERACT MODE';
-
     $file_extension = strtolower(pathinfo($uploaded_file['name'], PATHINFO_EXTENSION));
     $user_id = $_SESSION['user_id'];
-    $debug_info['file_extension'] = $file_extension;
-    $debug_info['user_id'] = $user_id;
 
+    // FIXED: Better filename sanitization
     $clean_filename = preg_replace('/[^a-zA-Z0-9._-]/', '_', $uploaded_file['name']);
+    $clean_filename = substr($clean_filename, 0, 100); // Limit length
     $timestamp = time();
     $final_filename = $timestamp . '_' . $clean_filename;
 
     $temp_upload_path = UPLOAD_DIR . 'temp_' . $final_filename;
-    $debug_info['temp_path'] = $temp_upload_path;
 
     if (!move_uploaded_file($uploaded_file['tmp_name'], $temp_upload_path)) {
-        $debug_info['error'] = 'Failed to move uploaded file';
-        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
+        error_log("Failed to move uploaded file: " . $uploaded_file['name']);
         return [
             'subject' => 'Others',
-            'summary' => 'Failed to move uploaded file to temporary location',
+            'summary' => 'Failed to upload file to server',
             'language' => 'en',
             'status' => 'error',
-            'debug' => $debug_info
+            'extracted_text' => '',
+            'debug' => 'File upload to temp directory failed'
         ];
     }
 
-    $debug_info['file_moved'] = 'File moved successfully to temp location';
-    $extracted_text = '';
+    // FIXED: Only process supported file types
+    $supported_extensions = ['jpg', 'jpeg', 'png', 'gif', 'webp']; // Removed PDF
 
-    // Simplified text extraction using Tesseract directly
-    if ($file_extension === 'pdf') {
-        $debug_info['processing_type'] = 'PDF - Direct Tesseract OCR (no ImageMagick)';
+    if (in_array($file_extension, $supported_extensions)) {
+        error_log("Processing image file: " . $uploaded_file['name']);
 
-        // Use the simplified PDF extraction
-        $extracted_text = extractTextFromPDF($temp_upload_path);
+        $analysis = processWithClaudeOCRandNLP($temp_upload_path, $uploaded_file['name']);
 
-        if ($extracted_text) {
-            $debug_info['pdf_processing'] = 'SUCCESS - Direct Tesseract extraction';
-        } else {
-            $debug_info['pdf_processing'] = 'FAILED - could not extract text with Tesseract';
-        }
-    } elseif (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp'])) {
-        $debug_info['processing_type'] = 'Image - Direct Tesseract OCR';
-        $ocr_result = performOCR($temp_upload_path);
-        $debug_info['ocr_result'] = $ocr_result;
-        $extracted_text = $ocr_result['text'];
-    } else {
-        $debug_info['error'] = 'Unsupported file type: ' . $file_extension;
-    }
+        // Check if processing was successful
+        if (
+            isset($analysis['subject']) && $analysis['subject'] !== 'Others' ||
+            !empty(trim($analysis['summary'])) && !strpos($analysis['summary'], 'failed')
+        ) {
 
-    $debug_info['extracted_text_length'] = $extracted_text ? strlen($extracted_text) : 0;
-    $debug_info['extracted_text_preview'] = $extracted_text ? substr($extracted_text, 0, 200) . '...' : 'No text extracted';
+            $subject = $analysis['subject'];
+            $language = $analysis['language'] ?? 'en';
+            $alt_summary = $analysis['summary_alt'] ?? '';
 
-    // Check if we have sufficient text for analysis
-    if (!$extracted_text || strlen(trim($extracted_text)) <= 10) {
-        $debug_info['error'] = 'Insufficient text extracted for analysis';
-        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
-
-        // Clean up temp file
-        if (file_exists($temp_upload_path)) {
-            unlink($temp_upload_path);
-        }
-
-        return [
-            'subject' => 'Others',
-            'summary' => 'Could not extract sufficient text from file. Please ensure the file contains clear, readable text for Tesseract OCR processing.',
-            'language' => 'en',
-            'status' => 'error',
-            'debug' => $debug_info
-        ];
-    }
-
-    // AI Analysis phase (unchanged)
-    $debug_info['ai_analysis'] = 'Starting AI analysis with Claude';
-    try {
-        $analysis = analyzeWithClaude($extracted_text, $uploaded_file['name']);
-        $debug_info['ai_analysis_result'] = $analysis;
-    } catch (Exception $e) {
-        $debug_info['ai_error'] = 'AI analysis failed: ' . $e->getMessage();
-        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
-
-        // Clean up temp file
-        if (file_exists($temp_upload_path)) {
-            unlink($temp_upload_path);
-        }
-
-        return [
-            'subject' => 'Others',
-            'summary' => 'AI analysis failed: ' . $e->getMessage(),
-            'language' => 'en',
-            'status' => 'error',
-            'debug' => $debug_info
-        ];
-    }
-
-    $subject = $analysis['subject'];
-    $language = isset($analysis['language']) ? $analysis['language'] : 'en';
-    $alt_summary = isset($analysis['summary_alt']) ? $analysis['summary_alt'] : '';
-
-    $debug_info['analysis_subject'] = $subject;
-    $debug_info['analysis_language'] = $language;
-
-    // File organization phase (unchanged)
-    $subject_upload_path = getUserUploadPath($user_id, $subject);
-    if (!file_exists($subject_upload_path)) {
-        if (!mkdir($subject_upload_path, 0755, true)) {
-            $debug_info['error'] = 'Failed to create subject directory: ' . $subject_upload_path;
-            $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
-
-            // Clean up temp file
-            if (file_exists($temp_upload_path)) {
-                unlink($temp_upload_path);
+            $subject_upload_path = getUserUploadPath($user_id, $subject);
+            if (!file_exists($subject_upload_path)) {
+                mkdir($subject_upload_path, 0755, true);
             }
 
+            $final_upload_path = $subject_upload_path . $final_filename;
+
+            if (rename($temp_upload_path, $final_upload_path)) {
+                $summary_file_path = createSummaryTextFile(
+                    $analysis['summary'],
+                    $uploaded_file['name'],
+                    $user_id,
+                    $subject,
+                    $language,
+                    $alt_summary
+                );
+
+                saveFileToDatabase(
+                    $user_id,
+                    $uploaded_file['name'],
+                    $subject,
+                    $file_extension,
+                    $final_upload_path,
+                    $summary_file_path,
+                    $language
+                );
+
+                error_log("Successfully processed file: " . $uploaded_file['name']);
+
+                return [
+                    'subject' => $subject,
+                    'summary' => $analysis['summary'],
+                    'language' => $language,
+                    'status' => 'completed',
+                    'extracted_text' => substr($analysis['extracted_text'] ?? '', 0, 1000),
+                    'file_path' => $final_upload_path,
+                    'debug' => $analysis['debug'] ?? 'Processed successfully'
+                ];
+            }
+        } else {
+            // Processing failed but file was uploaded
+            error_log("Claude processing failed for file: " . $uploaded_file['name']);
+            error_log("Analysis result: " . json_encode($analysis));
+        }
+    } else {
+        // Clean up temp file for unsupported types
+        if (file_exists($temp_upload_path)) {
+            unlink($temp_upload_path);
+        }
+
+        if ($file_extension === 'pdf') {
             return [
                 'subject' => 'Others',
-                'summary' => 'Failed to create storage directory',
+                'summary' => 'PDF files are not currently supported. Please convert your PDF to JPG or PNG format first.',
                 'language' => 'en',
                 'status' => 'error',
-                'debug' => $debug_info
+                'extracted_text' => '',
+                'debug' => 'PDF files not supported by Claude Vision API'
+            ];
+        } else {
+            return [
+                'subject' => 'Others',
+                'summary' => 'Unsupported file type. Please upload JPG, PNG, GIF, or WebP files.',
+                'language' => 'en',
+                'status' => 'error',
+                'extracted_text' => '',
+                'debug' => 'Unsupported file extension: ' . $file_extension
             ];
         }
     }
 
-    $final_upload_path = $subject_upload_path . $final_filename;
-    $debug_info['final_path'] = $final_upload_path;
+    // Fallback - save file even if processing failed
+    $subject = 'Others';
+    $language = 'en';
+    $subject_upload_path = getUserUploadPath($user_id, $subject);
 
-    if (!rename($temp_upload_path, $final_upload_path)) {
-        $debug_info['error'] = 'Failed to move file to final location';
-        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
-
-        // Clean up temp file
-        if (file_exists($temp_upload_path)) {
-            unlink($temp_upload_path);
-        }
-
-        return [
-            'subject' => 'Others',
-            'summary' => 'Failed to move file to final storage location',
-            'language' => 'en',
-            'status' => 'error',
-            'debug' => $debug_info
-        ];
+    if (!file_exists($subject_upload_path)) {
+        mkdir($subject_upload_path, 0755, true);
     }
 
-    // Summary file creation (unchanged)
-    try {
+    $final_upload_path = $subject_upload_path . $final_filename;
+
+    if (rename($temp_upload_path, $final_upload_path)) {
+        $fallback_summary = 'File uploaded but AI processing failed. You can try re-analyzing later.';
+
         $summary_file_path = createSummaryTextFile(
-            $analysis['summary'],
+            $fallback_summary,
             $uploaded_file['name'],
             $user_id,
             $subject,
             $language,
-            $alt_summary
+            ''
         );
-        $debug_info['summary_file_path'] = $summary_file_path;
-    } catch (Exception $e) {
-        $debug_info['summary_error'] = 'Failed to create summary file: ' . $e->getMessage();
-        $summary_file_path = null;
-    }
 
-    // Database storage (unchanged)
-    try {
-        $db_result = saveFileToDatabase(
+        saveFileToDatabase(
             $user_id,
             $uploaded_file['name'],
             $subject,
@@ -1001,194 +964,28 @@ function processUploadedFile($uploaded_file)
             $summary_file_path,
             $language
         );
-        $debug_info['database_save'] = $db_result ? 'SUCCESS' : 'FAILED';
-    } catch (Exception $e) {
-        $debug_info['database_error'] = 'Database save failed: ' . $e->getMessage();
-        $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
 
         return [
-            'subject' => 'Others',
-            'summary' => 'File processed but failed to save to database: ' . $e->getMessage(),
-            'language' => 'en',
-            'status' => 'error',
-            'debug' => $debug_info
+            'subject' => $subject,
+            'summary' => $fallback_summary,
+            'language' => $language,
+            'status' => 'partial',
+            'extracted_text' => '',
+            'file_path' => $final_upload_path,
+            'debug' => $analysis['debug'] ?? 'Processing failed, file saved'
         ];
     }
 
-    $debug_info['success'] = 'File processed successfully - SIMPLIFIED TESSERACT MODE';
-    $_SESSION['last_upload_debug']['processing_details'] = $debug_info;
-
     return [
-        'subject' => $subject,
-        'summary' => $analysis['summary'],
-        'language' => $language,
-        'status' => 'completed',
-        'extracted_text' => substr($extracted_text, 0, 1000),
-        'file_path' => $final_upload_path,
-        'debug' => $debug_info
+        'subject' => 'Others',
+        'summary' => 'Unknown error occurred during file processing',
+        'language' => 'en',
+        'status' => 'error',
+        'extracted_text' => '',
+        'debug' => 'Reached final fallback'
     ];
 }
 
-// IMPROVED FILE SERVING FUNCTION
-function serveOriginalFile($file_id, $user_id)
-{
-    // Add error logging
-    error_log("Serving file - ID: $file_id, User: $user_id");
-
-    $pdo = getDBConnection();
-    $sql = "SELECT * FROM user_files WHERE id = ? AND user_id = ?";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([$file_id, $user_id]);
-    $file = $stmt->fetch();
-
-    if (!$file) {
-        error_log("File not found in database - ID: $file_id");
-        header('HTTP/1.0 404 Not Found');
-        echo 'File not found in database';
-        exit;
-    }
-
-    if (!file_exists($file['original_file_path'])) {
-        error_log("File not found on disk: " . $file['original_file_path']);
-        header('HTTP/1.0 404 Not Found');
-        echo 'File not found on disk';
-        exit;
-    }
-
-    $file_path = $file['original_file_path'];
-    $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-    $file_size = filesize($file_path);
-
-    error_log("Serving file: $file_path, Size: $file_size bytes, Extension: $file_extension");
-
-    // Clear any previous output
-    if (ob_get_level()) {
-        ob_end_clean();
-    }
-
-    // Set appropriate headers based on file type
-    if ($file_extension === 'pdf') {
-        header('Content-Type: application/pdf');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-        header('X-Frame-Options: SAMEORIGIN'); // Allow iframe embedding from same origin
-    } elseif (in_array($file_extension, ['jpg', 'jpeg'])) {
-        header('Content-Type: image/jpeg');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif ($file_extension === 'png') {
-        header('Content-Type: image/png');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif ($file_extension === 'gif') {
-        header('Content-Type: image/gif');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif ($file_extension === 'webp') {
-        header('Content-Type: image/webp');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif (in_array($file_extension, ['bmp', 'tiff', 'tif'])) {
-        header('Content-Type: image/' . $file_extension);
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } else {
-        // For unknown file types, force download
-        header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="' . basename($file['file_name']) . '"');
-    }
-
-    // Set cache headers
-    header('Cache-Control: private, max-age=3600'); // Cache for 1 hour
-    header('Last-Modified: ' . gmdate('D, d M Y H:i:s', filemtime($file_path)) . ' GMT');
-
-    // Set content length
-    header('Content-Length: ' . $file_size);
-
-    // Handle range requests for large files (helps with loading)
-    if (isset($_SERVER['HTTP_RANGE'])) {
-        $range = $_SERVER['HTTP_RANGE'];
-        if (preg_match('/bytes=(\d+)-(\d*)/', $range, $matches)) {
-            $start = intval($matches[1]);
-            $end = $matches[2] ? intval($matches[2]) : $file_size - 1;
-
-            header('HTTP/1.1 206 Partial Content');
-            header("Content-Range: bytes $start-$end/$file_size");
-            header('Content-Length: ' . ($end - $start + 1));
-
-            // Read and output the range
-            $fp = fopen($file_path, 'rb');
-            fseek($fp, $start);
-            echo fread($fp, $end - $start + 1);
-            fclose($fp);
-            exit;
-        }
-    }
-
-    // For small files, read directly
-    if ($file_size < 10 * 1024 * 1024) { // Less than 10MB
-        readfile($file_path);
-    } else {
-        // For larger files, read in chunks to avoid memory issues
-        $fp = fopen($file_path, 'rb');
-        if ($fp) {
-            while (!feof($fp)) {
-                echo fread($fp, 8192); // 8KB chunks
-                if (connection_aborted()) {
-                    break;
-                }
-                flush();
-            }
-            fclose($fp);
-        } else {
-            error_log("Could not open file for reading: $file_path");
-            header('HTTP/1.0 500 Internal Server Error');
-            echo 'Could not read file';
-        }
-    }
-
-    exit;
-}
-
-function serveSummaryFile($file_id, $user_id)
-{
-    $pdo = getDBConnection();
-    $sql = "SELECT * FROM user_files WHERE id = ? AND user_id = ?";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([$file_id, $user_id]);
-    $file = $stmt->fetch();
-
-    if (!$file || !file_exists($file['summary_file_path'])) {
-        header('HTTP/1.0 404 Not Found');
-        echo 'Summary file not found';
-        return;
-    }
-
-    header('Content-Type: text/plain');
-    header('Content-Disposition: attachment; filename="' . pathinfo($file['file_name'], PATHINFO_FILENAME) . '_summary.txt"');
-    header('Content-Length: ' . filesize($file['summary_file_path']));
-    readfile($file['summary_file_path']);
-}
-
-function deleteUserFile($file_id, $user_id)
-{
-    $pdo = getDBConnection();
-    $sql = "SELECT * FROM user_files WHERE id = ? AND user_id = ?";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([$file_id, $user_id]);
-    $file = $stmt->fetch();
-
-    if ($file) {
-        if (file_exists($file['original_file_path'])) {
-            unlink($file['original_file_path']);
-        }
-        if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-            unlink($file['summary_file_path']);
-        }
-
-        $delete_sql = "DELETE FROM user_files WHERE id = ? AND user_id = ?";
-        $delete_stmt = $pdo->prepare($delete_sql);
-        return $delete_stmt->execute([$file_id, $user_id]);
-    }
-
-    return false;
-}
-
-// UPDATED: reanalyzeFile function with simplified Tesseract processing
 function reanalyzeFile($file_id, $user_id)
 {
     $pdo = getDBConnection();
@@ -1198,84 +995,109 @@ function reanalyzeFile($file_id, $user_id)
     $file = $stmt->fetch();
 
     if (!$file || !file_exists($file['original_file_path'])) {
+        error_log("Reanalyze failed: File not found - ID: $file_id, Path: " . ($file['original_file_path'] ?? 'null'));
         return false;
     }
 
     $file_extension = strtolower(pathinfo($file['original_file_path'], PATHINFO_EXTENSION));
-    $extracted_text = '';
 
-    if ($file_extension === 'pdf') {
-        // Use simplified PDF processing with direct Tesseract
-        $extracted_text = extractTextFromPDF($file['original_file_path']);
-    } else if (in_array($file_extension, ['jpg', 'jpeg', 'png', 'gif', 'bmp', 'tiff', 'tif', 'webp'])) {
-        $ocr_result = performOCR($file['original_file_path']);
-        $extracted_text = $ocr_result['text'];
-    }
+    // Use Claude for both OCR and NLP analysis
+    if (in_array($file_extension, ['pdf', 'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp'])) {
+        error_log("Re-analyzing file with Claude: " . $file['file_name']);
 
-    if ($extracted_text && strlen(trim($extracted_text)) > 10) {
-        $analysis = analyzeWithClaude($extracted_text, $file['file_name']);
-        $new_subject = $analysis['subject'];
-        $new_language = isset($analysis['language']) ? $analysis['language'] : 'en';
-        $alt_summary = isset($analysis['summary_alt']) ? $analysis['summary_alt'] : '';
+        $analysis = processWithClaudeOCRandNLP($file['original_file_path'], $file['file_name']);
 
-        // Update summary file with new analysis
-        if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-            // Create new summary content with language info
-            $summary_content = $analysis['summary'];
+        // Check if analysis was successful
+        if (!empty(trim($analysis['summary']))) {
+            $new_subject = $analysis['subject'];
+            $new_language = isset($analysis['language']) ? $analysis['language'] : 'en';
+            $alt_summary = isset($analysis['summary_alt']) ? $analysis['summary_alt'] : '';
 
-            // Add alternative language summary if available
-            if (!empty($alt_summary)) {
-                $separator = "\n\n" . str_repeat("-", 50) . "\n";
-                if ($new_language === 'th') {
-                    $summary_content .= $separator . "English Summary:\n" . $alt_summary;
+            // Update summary file with new analysis
+            if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
+                $summary_content = $analysis['summary'];
+
+                // Add alternative language summary if available
+                if (!empty($alt_summary)) {
+                    $separator = "\n\n" . str_repeat("-", 50) . "\n";
+                    if ($new_language === 'th') {
+                        $summary_content .= $separator . "English Summary:\n" . $alt_summary;
+                    } else {
+                        $summary_content .= $separator . "สรุปภาษาไทย:\n" . $alt_summary;
+                    }
+                }
+
+                // Add metadata
+                $summary_content .= "\n\n" . str_repeat("=", 50) . "\n";
+                $summary_content .= "Language: " . ($new_language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
+                $summary_content .= "Re-analyzed with Claude OCR+NLP: " . date('Y-m-d H:i:s') . "\n";
+                $summary_content .= "Debug: " . ($analysis['debug'] ?? 'Re-analysis completed') . "\n";
+
+                file_put_contents($file['summary_file_path'], $summary_content);
+                error_log("Updated summary file: " . $file['summary_file_path']);
+            }
+
+            // Update database - ensure language column exists
+            try {
+                $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
+                if ($check_column->rowCount() == 0) {
+                    $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
+                    error_log("Added language column to user_files table");
+                }
+            } catch (Exception $e) {
+                error_log("Error checking/adding language column: " . $e->getMessage());
+            }
+
+            // Move file if subject classification changed
+            if ($new_subject !== $file['subject']) {
+                error_log("Subject changed from {$file['subject']} to $new_subject for file ID: $file_id");
+
+                $new_subject_path = getUserUploadPath($user_id, $new_subject);
+                if (!file_exists($new_subject_path)) {
+                    mkdir($new_subject_path, 0755, true);
+                }
+
+                $new_file_path = $new_subject_path . basename($file['original_file_path']);
+
+                if (rename($file['original_file_path'], $new_file_path)) {
+                    // Update database with new subject, path, and language
+                    $update_sql = "UPDATE user_files SET subject = ?, original_file_path = ?, language = ? WHERE id = ?";
+                    $update_stmt = $pdo->prepare($update_sql);
+                    $success = $update_stmt->execute([$new_subject, $new_file_path, $new_language, $file_id]);
+
+                    if ($success) {
+                        error_log("Successfully updated file record - new subject: $new_subject, new language: $new_language");
+                    } else {
+                        error_log("Failed to update database record for file ID: $file_id");
+                    }
                 } else {
-                    $summary_content .= $separator . "สรุปภาษาไทย:\n" . $alt_summary;
+                    error_log("Failed to move file from {$file['original_file_path']} to $new_file_path");
+                    return false;
+                }
+            } else {
+                // Subject didn't change, just update language
+                $update_sql = "UPDATE user_files SET language = ? WHERE id = ?";
+                $update_stmt = $pdo->prepare($update_sql);
+                $success = $update_stmt->execute([$new_language, $file_id]);
+
+                if ($success) {
+                    error_log("Successfully updated language to: $new_language for file ID: $file_id");
+                } else {
+                    error_log("Failed to update language for file ID: $file_id");
                 }
             }
 
-            // Add language metadata
-            $summary_content .= "\n\n" . str_repeat("=", 50) . "\n";
-            $summary_content .= "Language: " . ($new_language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
-            $summary_content .= "Re-analyzed: " . date('Y-m-d H:i:s') . "\n";
-
-            file_put_contents($file['summary_file_path'], $summary_content);
-        }
-
-        // Update database with new language info
-        try {
-            // Check if language column exists
-            $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
-            if ($check_column->rowCount() == 0) {
-                $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
-            }
-        } catch (Exception $e) {
-            error_log("Error checking/adding language column: " . $e->getMessage());
-        }
-
-        // If subject changed, move file to new subject folder
-        if ($new_subject !== $file['subject']) {
-            $new_subject_path = getUserUploadPath($user_id, $new_subject);
-            if (!file_exists($new_subject_path)) {
-                mkdir($new_subject_path, 0755, true);
-            }
-
-            $new_file_path = $new_subject_path . basename($file['original_file_path']);
-            if (rename($file['original_file_path'], $new_file_path)) {
-                $update_sql = "UPDATE user_files SET subject = ?, original_file_path = ?, language = ? WHERE id = ?";
-                $update_stmt = $pdo->prepare($update_sql);
-                $update_stmt->execute([$new_subject, $new_file_path, $new_language, $file_id]);
-            }
+            return true;
         } else {
-            // Just update the language
-            $update_sql = "UPDATE user_files SET language = ? WHERE id = ?";
-            $update_stmt = $pdo->prepare($update_sql);
-            $update_stmt->execute([$new_language, $file_id]);
+            // Claude analysis failed
+            error_log("Claude re-analysis failed for file ID: $file_id - " . ($analysis['debug'] ?? 'Unknown error'));
+            return false;
         }
-
-        return true;
+    } else {
+        // Unsupported file type for Claude
+        error_log("Unsupported file type for Claude re-analysis: $file_extension");
+        return false;
     }
-
-    return false;
 }
 
 // Create upload directory if it doesn't exist
@@ -1288,42 +1110,16 @@ if (isset($_SESSION['user_id'])) {
     createUserFolderStructure($_SESSION['user_id']);
 }
 
-// Handle file upload with enhanced error handling and debugging
+// Handle file upload
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_FILES['uploaded_file'])) {
     $uploaded_file = $_FILES['uploaded_file'];
 
-    // Add debug session variable to show processing status
-    $_SESSION['last_upload_debug'] = [];
-    $_SESSION['last_upload_debug']['timestamp'] = date('Y-m-d H:i:s');
-    $_SESSION['last_upload_debug']['filename'] = $uploaded_file['name'];
-
     if ($uploaded_file['error'] === UPLOAD_ERR_OK) {
-        $_SESSION['last_upload_debug']['upload_status'] = 'File uploaded successfully';
-
-        try {
-            $processing_result = processUploadedFile($uploaded_file);
-            $_SESSION['last_upload_debug']['processing_result'] = $processing_result;
-
-            if ($processing_result['status'] === 'completed') {
-                $_SESSION['last_upload_debug']['final_status'] = 'SUCCESS: File processed and saved with simplified Tesseract OCR';
-            } else {
-                $_SESSION['last_upload_debug']['final_status'] = 'ERROR: Processing failed - ' . $processing_result['summary'];
-            }
-        } catch (Exception $e) {
-            $_SESSION['last_upload_debug']['final_status'] = 'EXCEPTION: ' . $e->getMessage();
-            error_log("File processing exception: " . $e->getMessage());
-        }
-
-        // Redirect with debug parameter
-        $redirect_params = $_GET;
-        $redirect_params['debug'] = '1';
-        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($redirect_params));
+        $processing_result = processUploadedFile($uploaded_file);
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($_GET));
         exit();
     } else {
-        $_SESSION['last_upload_debug']['upload_status'] = 'Upload failed with error: ' . $uploaded_file['error'];
-        $redirect_params = $_GET;
-        $redirect_params['debug'] = '1';
-        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($redirect_params));
+        header('Location: ' . $_SERVER['PHP_SELF'] . '?' . http_build_query($_GET));
         exit();
     }
 }
@@ -1333,7 +1129,7 @@ $active_tab = isset($_GET['tab']) ? $_GET['tab'] : 'dashboard';
 $selected_subject = isset($_GET['subject']) ? $_GET['subject'] : null;
 
 // Get user files from database
-$user_files = getUserFiles($_SESSION['user_id']);
+$user_files = getUserFilesSafe($_SESSION['user_id']);
 
 // Define subjects with their counts
 $subjects = [
@@ -1382,8 +1178,6 @@ function getSubjectIcon($subject)
     return $icons[$subject] ?? '📄';
 }
 
-// Continue with your existing HTML output...
-// [The rest of your HTML code remains the same]
 ?>
 
 <!DOCTYPE html>
@@ -1947,59 +1741,6 @@ function getSubjectIcon($subject)
 
             <!-- Content Area -->
             <div class="flex-1 overflow-auto custom-scrollbar content-padding print-full-width">
-                <?php
-                // Debug information display
-                if (isset($_GET['debug']) && isset($_SESSION['last_upload_debug'])):
-                ?>
-                    <div class="mb-6 bg-yellow-900 bg-opacity-50 border border-yellow-600 rounded-lg p-4">
-                        <h3 class="text-yellow-200 font-semibold mb-3 flex items-center">
-                            <span class="mr-2">🐛</span>Debug Information - Last Upload
-                            <button onclick="this.parentElement.parentElement.style.display='none'" class="ml-auto text-yellow-400 hover:text-yellow-200">✕</button>
-                        </h3>
-
-                        <div class="space-y-3 text-sm">
-                            <div class="bg-black bg-opacity-30 rounded p-3">
-                                <h4 class="text-yellow-300 font-medium mb-2">📋 Basic Info:</h4>
-                                <p class="text-yellow-100">File: <?php echo htmlspecialchars($_SESSION['last_upload_debug']['filename'] ?? 'Unknown'); ?></p>
-                                <p class="text-yellow-100">Time: <?php echo htmlspecialchars($_SESSION['last_upload_debug']['timestamp'] ?? 'Unknown'); ?></p>
-                                <p class="text-yellow-100">Status: <?php echo htmlspecialchars($_SESSION['last_upload_debug']['final_status'] ?? 'Unknown'); ?></p>
-                            </div>
-
-                            <?php if (isset($_SESSION['last_upload_debug']['processing_details'])): ?>
-                                <div class="bg-black bg-opacity-30 rounded p-3">
-                                    <h4 class="text-yellow-300 font-medium mb-2">🔍 Processing Details:</h4>
-                                    <pre class="text-yellow-100 text-xs overflow-auto max-h-40"><?php echo htmlspecialchars(print_r($_SESSION['last_upload_debug']['processing_details'], true)); ?></pre>
-                                </div>
-                            <?php endif; ?>
-
-                            <div class="bg-black bg-opacity-30 rounded p-3">
-                                <h4 class="text-yellow-300 font-medium mb-2">🔧 Configuration Check:</h4>
-                                <p class="text-yellow-100">Tesseract OCR: <?php echo (shell_exec('tesseract --version 2>&1') && strpos(shell_exec('tesseract --version 2>&1'), 'tesseract') !== false) ? '✅ Installed' : '❌ Not Found'; ?></p>
-                                <p class="text-yellow-100">Claude API Key: <?php echo (empty(CLAUDE_API_KEY)) ? '❌ NOT CONFIGURED' : '✅ Configured'; ?></p>
-                                <p class="text-yellow-100">Upload Directory: <?php echo is_writable(UPLOAD_DIR) ? '✅ Writable' : '❌ Not Writable'; ?></p>
-                                <p class="text-yellow-100">pdftotext Tool: <?php echo (shell_exec('pdftotext -v 2>&1') && strpos(shell_exec('pdftotext -v 2>&1'), 'pdftotext') !== false) ? '✅ Available' : '❌ Not Available'; ?></p>
-                                <p class="text-yellow-100">PHP Upload Max: <?php echo ini_get('upload_max_filesize'); ?></p>
-                                <p class="text-yellow-100">PHP Post Max: <?php echo ini_get('post_max_size'); ?></p>
-                            </div>
-
-                            <?php if (!(shell_exec('tesseract --version 2>&1') && strpos(shell_exec('tesseract --version 2>&1'), 'tesseract') !== false)): ?>
-                                <div class="bg-red-900 bg-opacity-50 border border-red-600 rounded p-3">
-                                    <h4 class="text-red-300 font-medium mb-2">⚠️ Configuration Issue:</h4>
-                                    <p class="text-red-200 text-sm">Tesseract OCR is not installed or not accessible. Please:</p>
-                                    <ol class="text-red-200 text-sm mt-2 ml-4 list-decimal">
-                                        <li>Install Tesseract OCR on your server</li>
-                                        <li>For Ubuntu/Debian: <code>sudo apt-get install tesseract-ocr tesseract-ocr-tha</code></li>
-                                        <li>For CentOS/RHEL: <code>sudo yum install tesseract</code></li>
-                                        <li>For additional language support: <code>sudo apt-get install tesseract-ocr-tha</code> (for Thai)</li>
-                                        <li>Verify installation: <code>tesseract --version</code></li>
-                                        <li><strong>Note:</strong> This simplified version uses Tesseract directly - no ImageMagick required!</li>
-                                    </ol>
-                                </div>
-                            <?php endif; ?>
-                        </div>
-                    </div>
-                <?php endif; ?>
-
                 <?php if ($active_tab === 'dashboard'): ?>
                     <!-- Dashboard View -->
                     <div class="grid grid-cols-1 xl:grid-cols-3 gap-4 sm:gap-6 lg:gap-8">
@@ -2024,25 +1765,18 @@ function getSubjectIcon($subject)
                                     </form>
                                     <form method="post" enctype="multipart/form-data">
                                         <label class="cursor-pointer block">
-                                            <input type="file" name="uploaded_file" accept="image/*,.webp" class="hidden" />
+                                            <input type="file" name="uploaded_file" accept="image/*" class="hidden" />
                                             <div class="upload-area glass-card rounded-lg sm:rounded-xl p-4 sm:p-6 text-center hover:shadow-lg transition-all duration-300 border-2 border-dashed border-theme-bright hover:border-theme-green btn-touch">
                                                 <div class="text-theme-green text-2xl sm:text-4xl mb-2 sm:mb-3">🖼️</div>
                                                 <span class="text-base sm:text-lg font-medium text-white">Images</span>
-                                                <p class="text-xs sm:text-sm text-gray-300 mt-1 sm:mt-2">JPG, PNG, WebP, etc.</p>
+                                                <p class="text-xs sm:text-sm text-gray-300 mt-1 sm:mt-2">JPG, PNG, etc.</p>
                                             </div>
                                         </label>
                                     </form>
                                 </div>
                                 <div class="bg-theme-bright rounded-lg p-3 sm:p-4 border-l-4 border-theme-green">
-                                    <div class="flex items-center justify-between">
-                                        <div class="flex-1">
-                                            <p class="text-black font-medium text-sm sm:text-base">🖥️ AI-Powered with Tesseract OCR</p>
-                                            <p class="text-black text-xs sm:text-sm mt-1">Enhanced OCR accuracy with local Tesseract processing. AI generates detailed summaries with bullet points, key concepts, and important keywords in Thai or English.</p>
-                                        </div>
-                                        <button onclick="testAPIConfiguration()" class="ml-4 px-3 py-1 bg-theme-medium hover:bg-theme-dark text-white rounded text-xs font-medium btn-touch flex-shrink-0">
-                                            Test Setup
-                                        </button>
-                                    </div>
+                                    <p class="text-black font-medium text-sm sm:text-base">🌏 AI-Powered Multilingual Organization</p>
+                                    <p class="text-black text-xs sm:text-sm mt-1">Files are automatically categorized by subject and summarized in Thai or English based on content language</p>
                                 </div>
                             </div>
 
@@ -2076,18 +1810,7 @@ function getSubjectIcon($subject)
                                         <div class="text-center py-6 sm:py-8">
                                             <div class="text-gray-400 text-3xl sm:text-4xl mb-2 sm:mb-3">📂</div>
                                             <p class="text-gray-300 text-sm sm:text-base">No files uploaded yet</p>
-                                            <p class="text-gray-400 text-xs sm:text-sm mb-4">Upload your first document to get started</p>
-
-                                            <!-- Quick troubleshooting -->
-                                            <div class="bg-blue-900 bg-opacity-30 rounded-lg p-4 mt-4 text-left">
-                                                <h5 class="text-blue-300 font-medium mb-2 text-center">📋 First time? Here's what to do:</h5>
-                                                <div class="text-blue-200 text-xs space-y-1">
-                                                    <p>1. Click "Test Setup" button above to verify your configuration</p>
-                                                    <p>2. If setup is complete, try uploading a PDF or image</p>
-                                                    <p>3. If upload fails, check the debug information</p>
-                                                    <p>4. Make sure Tesseract OCR is installed on your server</p>
-                                                </div>
-                                            </div>
+                                            <p class="text-gray-400 text-xs sm:text-sm">Upload your first document to get started</p>
                                         </div>
                                     <?php else: ?>
                                         <?php foreach ($recent_files as $file): ?>
@@ -2232,7 +1955,7 @@ function getSubjectIcon($subject)
                                     </button>
                                     <form method="post" enctype="multipart/form-data" class="inline flex-1 sm:flex-none">
                                         <label class="cursor-pointer w-full sm:w-auto">
-                                            <input type="file" name="uploaded_file" accept=".pdf,image/*,.webp" class="hidden" />
+                                            <input type="file" name="uploaded_file" accept=".pdf,image/*" class="hidden" />
                                             <div class="px-3 sm:px-4 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors cursor-pointer text-center btn-touch">
                                                 <span class="text-xs sm:text-sm">📤 Upload File</span>
                                             </div>
@@ -2253,7 +1976,7 @@ function getSubjectIcon($subject)
                                     </p>
                                     <form method="post" enctype="multipart/form-data" class="inline">
                                         <label class="cursor-pointer">
-                                            <input type="file" name="uploaded_file" accept=".pdf,image/*,.webp" class="hidden" />
+                                            <input type="file" name="uploaded_file" accept=".pdf,image/*" class="hidden" />
                                             <div class="px-4 sm:px-6 py-2 sm:py-3 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors cursor-pointer inline-flex items-center btn-touch">
                                                 <span class="mr-2">📤</span>
                                                 <span class="text-sm sm:text-base">Upload Your First File</span>
@@ -2300,35 +2023,7 @@ function getSubjectIcon($subject)
                                             <p class="text-xs sm:text-sm text-black line-clamp-3">
                                                 <?php
                                                 if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-                                                    $summary_content = file_get_contents($file['summary_file_path']);
-
-                                                    // Extract the main content between AI ANALYSIS and technical info
-                                                    if (preg_match('/🤖 AI ANALYSIS:\s*\n\n(.*?)\n\n.*?(?:🇺🇸|🇹🇭|📊)/s', $summary_content, $matches)) {
-                                                        $clean_summary = $matches[1];
-                                                    } else {
-                                                        $clean_summary = $summary_content;
-                                                    }
-
-                                                    // Remove emojis and clean up formatting for preview
-                                                    $clean_summary = preg_replace('/📌\s*/', '', $clean_summary);
-                                                    $clean_summary = preg_replace('/\[([^\]]+)\]:/', '$1:', $clean_summary);
-                                                    $clean_summary = trim($clean_summary);
-
-                                                    // Truncate for preview but try to end at a complete concept
-                                                    if (strlen($clean_summary) > 150) {
-                                                        $truncated = substr($clean_summary, 0, 150);
-                                                        // Try to end at a bullet point or section
-                                                        if (strpos($truncated, '•') !== false) {
-                                                            $last_bullet = strrpos($truncated, '•');
-                                                            $next_newline = strpos($clean_summary, "\n", $last_bullet);
-                                                            if ($next_newline !== false && $next_newline < 200) {
-                                                                $truncated = substr($clean_summary, 0, $next_newline);
-                                                            }
-                                                        }
-                                                        echo htmlspecialchars($truncated . '...');
-                                                    } else {
-                                                        echo htmlspecialchars($clean_summary);
-                                                    }
+                                                    echo htmlspecialchars(substr(file_get_contents($file['summary_file_path']), 0, 200) . '...');
                                                 } else {
                                                     echo htmlspecialchars($file['summary'] ?? 'No summary available');
                                                 }
@@ -2462,6 +2157,7 @@ function getSubjectIcon($subject)
         </div>
     </div>
 
+    <!-- STEP 2: Add this Settings Modal right after the File Details Modal (around line 1200) -->
     <!-- Settings Modal -->
     <div id="settingsModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-2 sm:p-4 no-print">
         <div class="glass-card rounded-xl sm:rounded-2xl max-w-2xl w-full max-h-[95vh] sm:max-h-[90vh] overflow-hidden border-theme-light">
@@ -2492,67 +2188,7 @@ function getSubjectIcon($subject)
                         We're working hard to bring you amazing settings and customization options. Stay tuned for updates!
                     </p>
 
-                    <!-- Coming Soon Features -->
-                    <div class="space-y-3 sm:space-y-4 mb-6 sm:mb-8">
-                        <div class="bg-theme-bright bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
-                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
-                                <span class="mr-2">🎨</span>Theme Customization
-                            </h5>
-                            <p class="text-gray-300 text-xs sm:text-sm">Choose from multiple color themes and layout options</p>
-                        </div>
 
-                        <div class="bg-theme-green bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
-                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
-                                <span class="mr-2">🌐</span>Language Preferences
-                            </h5>
-                            <p class="text-gray-300 text-xs sm:text-sm">Set default language for AI analysis and interface</p>
-                        </div>
-
-                        <div class="bg-theme-medium bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
-                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
-                                <span class="mr-2">🔔</span>Notifications
-                            </h5>
-                            <p class="text-gray-300 text-xs sm:text-sm">Configure email notifications and system alerts</p>
-                        </div>
-
-                        <div class="bg-theme-light bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
-                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
-                                <span class="mr-2">💾</span>Export Options
-                            </h5>
-                            <p class="text-gray-300 text-xs sm:text-sm">Export your data and summaries in various formats</p>
-                        </div>
-
-                        <div class="bg-blue-500 bg-opacity-10 rounded-lg p-3 sm:p-4 text-left">
-                            <h5 class="font-semibold text-white mb-2 flex items-center text-sm sm:text-base">
-                                <span class="mr-2">🤖</span>AI Preferences
-                            </h5>
-                            <p class="text-gray-300 text-xs sm:text-sm">Customize AI analysis depth and summary style</p>
-                        </div>
-                    </div>
-
-                    <!-- Progress Indicator -->
-                    <div class="bg-theme-dark bg-opacity-30 rounded-lg p-4 sm:p-6 mb-6">
-                        <h5 class="font-semibold text-white mb-3 flex items-center justify-center text-sm sm:text-base">
-                            <span class="mr-2">📊</span>Development Progress
-                        </h5>
-                        <div class="relative">
-                            <div class="flex mb-2 items-center justify-between">
-                                <div>
-                                    <span class="text-xs font-semibold inline-block text-theme-green">
-                                        Settings Panel
-                                    </span>
-                                </div>
-                                <div class="text-right">
-                                    <span class="text-xs font-semibold inline-block text-theme-green">
-                                        25%
-                                    </span>
-                                </div>
-                            </div>
-                            <div class="overflow-hidden h-2 mb-4 text-xs flex rounded bg-theme-medium">
-                                <div style="width:25%" class="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center bg-theme-green animate-pulse"></div>
-                            </div>
-                        </div>
-                    </div>
 
                     <!-- Action Buttons -->
                     <div class="flex flex-col sm:flex-row gap-3 sm:gap-4 justify-center">
@@ -2566,9 +2202,167 @@ function getSubjectIcon($subject)
         </div>
     </div>
 
+    <!-- STEP 3: Add this JavaScript at the end of your existing script section (around line 1800) -->
+    <script>
+        // Settings Panel Functions
+        function openSettingsPanel() {
+            console.log('Opening settings panel...');
+
+            // Close mobile sidebar if it's open
+            if (window.innerWidth <= 768) {
+                const sidebar = document.getElementById('sidebar');
+                const overlay = document.getElementById('mobileOverlay');
+                const menuBtn = document.getElementById('mobileMenuBtn');
+
+                if (sidebar && sidebar.classList.contains('active')) {
+                    sidebar.classList.remove('active');
+                    overlay.classList.remove('active');
+                    menuBtn.classList.remove('hidden');
+                }
+            }
+
+            const modal = document.getElementById('settingsModal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                document.body.style.overflow = 'hidden';
+
+                // Add a subtle animation
+                setTimeout(() => {
+                    modal.style.opacity = '1';
+                }, 10);
+            } else {
+                console.error('Settings modal not found');
+            }
+        }
+
+        // The rest of the settings functions remain the same
+        function closeSettingsPanel() {
+            console.log('Closing settings panel...');
+            const modal = document.getElementById('settingsModal');
+            if (modal) {
+                modal.classList.add('hidden');
+                document.body.style.overflow = '';
+                modal.style.opacity = '0';
+            }
+        }
+
+        // Close settings modal when clicking outside
+        document.getElementById('settingsModal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeSettingsPanel();
+            }
+        });
+
+        // Update the existing escape key handler to also close settings modal
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                // Close settings modal
+                const settingsModal = document.getElementById('settingsModal');
+                if (settingsModal && !settingsModal.classList.contains('hidden')) {
+                    closeSettingsPanel();
+                    return; // Exit early if settings was open
+                }
+
+                // Existing escape key functionality for file details modal and mobile sidebar
+                closeFileDetails();
+
+                if (window.innerWidth <= 768) {
+                    const sidebar = document.getElementById('sidebar');
+                    const overlay = document.getElementById('mobileOverlay');
+                    const menuBtn = document.getElementById('mobileMenuBtn');
+                    if (sidebar && overlay && menuBtn) {
+                        sidebar.classList.remove('active');
+                        overlay.classList.remove('active');
+                        menuBtn.classList.remove('hidden');
+                        document.body.style.overflow = '';
+                    }
+                }
+            }
+        });
+
+        // Optional: Add keyboard shortcut for settings (Ctrl/Cmd + ,)
+        document.addEventListener('keydown', function(e) {
+            if ((e.ctrlKey || e.metaKey) && e.key === ',') {
+                // Don't trigger when modal is already open or when typing in inputs
+                if (document.getElementById('fileDetailsModal').classList.contains('hidden') &&
+                    document.getElementById('settingsModal').classList.contains('hidden') &&
+                    !e.target.matches('input, textarea, select')) {
+                    e.preventDefault();
+                    openSettingsPanel();
+                }
+            }
+        });
+
+        console.log('Settings panel functionality initialized');
+    </script>
+
+    <!-- STEP 4: Add this CSS to your existing style section (around line 200) -->
+    <style>
+        /* Settings Modal Animation */
+        #settingsModal {
+            opacity: 0;
+            transition: opacity 0.3s ease-in-out;
+        }
+
+        #settingsModal:not(.hidden) {
+            opacity: 1;
+        }
+
+        /* Progress bar animation */
+        @keyframes progressPulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: 0.7;
+            }
+        }
+
+        .animate-pulse {
+            animation: progressPulse 2s infinite;
+        }
+
+        /* Hover effects for feature cards */
+        .glass-card:hover {
+            transform: translateY(-1px);
+            transition: transform 0.2s ease-in-out;
+        }
+
+        /* Mobile responsiveness for settings */
+        @media (max-width: 640px) {
+            .sidebar .space-y-1 {
+                space-y: 0.25rem;
+            }
+
+            .sidebar .btn-touch {
+                min-height: 44px;
+            }
+        }
+
+        .sidebar .border-t.border-theme-medium::before {
+            content: '';
+            position: absolute;
+            top: -1px;
+            left: 1rem;
+            right: 1rem;
+            height: 1px;
+            background: linear-gradient(90deg, transparent, var(--color-accent-light), transparent);
+            opacity: 0.3;
+        }
+
+        #settingsBtn:hover {
+            background-color: var(--color-primary-medium);
+            transform: translateX(2px);
+            transition: all 0.2s ease;
+        }
+    </style>
+
     <script>
         // Store file data globally
-        const fileData = <?php echo json_encode($user_files); ?>;
+        const fileData = <?php echo safeJsonEncode($user_files); ?>;
         console.log('File data loaded:', fileData);
 
         // Global variable to store current file ID
@@ -2638,32 +2432,10 @@ function getSubjectIcon($subject)
                 const fileLanguage = file.language || 'en';
                 const isThaiLanguage = fileLanguage === 'th';
 
-                // Update modal content with enhanced formatting
+                // Update modal content
                 document.getElementById('modalFileName').textContent = file.name || 'Unknown File';
                 document.getElementById('modalSubject').textContent = file.subject || 'Unknown Subject';
-
-                // Format the summary content for better display
-                let displaySummary = file.full_summary || (isThaiLanguage ? 'ไม่มีข้อมูลสรุป' : 'No summary available');
-
-                // Convert structured text to HTML for better display
-                if (displaySummary && displaySummary !== 'ไม่มีข้อมูลสรุป' && displaySummary !== 'No summary available') {
-                    // Replace section headers with bold formatting
-                    displaySummary = displaySummary.replace(/\[([^\]]+)\]:/g, '<strong>$1:</strong>');
-
-                    // Format bullet points
-                    displaySummary = displaySummary.replace(/\n\s*•\s*/g, '\n• ');
-                    displaySummary = displaySummary.replace(/•([^\n]+)/g, '<span style="margin-left: 1em;">• $1</span>');
-
-                    // Add line breaks for better spacing
-                    displaySummary = displaySummary.replace(/\n\n/g, '<br><br>');
-                    displaySummary = displaySummary.replace(/\n/g, '<br>');
-
-                    // Highlight keywords section
-                    displaySummary = displaySummary.replace(/<strong>(Important Keywords|คำศัพท์สำคัญ):<\/strong>\s*([^<]+)/g,
-                        '<strong>$1:</strong><br><span style="background-color: rgba(129, 249, 121, 0.2); padding: 2px 6px; border-radius: 4px; font-weight: 500;">$2</span>');
-                }
-
-                document.getElementById('modalSummary').innerHTML = displaySummary;
+                document.getElementById('modalSummary').textContent = file.full_summary || (isThaiLanguage ? 'ไม่มีข้อมูลสรุป' : 'No summary available');
 
                 // Update language badge and info
                 const languageBadge = document.getElementById('modalLanguageBadge');
@@ -2788,7 +2560,7 @@ function getSubjectIcon($subject)
                     </div>
                     
                     <!-- Preview Option (only for supported file types) -->
-                    ${(fileExtension === 'pdf' || ['jpg', 'jpeg', 'png', 'gif', 'webp'].includes(fileExtension)) ? `
+                    ${(fileExtension === 'pdf' || ['jpg', 'jpeg', 'png', 'gif'].includes(fileExtension)) ? `
                     <div class="border-t border-theme-light pt-4">
                         <div class="bg-theme-green bg-opacity-10 rounded-lg p-4">
                             <div class="flex items-center justify-between mb-3">
@@ -3011,47 +2783,6 @@ function getSubjectIcon($subject)
             }
         }
 
-        // Settings Panel Functions
-        function openSettingsPanel() {
-            console.log('Opening settings panel...');
-
-            // Close mobile sidebar if it's open
-            if (window.innerWidth <= 768) {
-                const sidebar = document.getElementById('sidebar');
-                const overlay = document.getElementById('mobileOverlay');
-                const menuBtn = document.getElementById('mobileMenuBtn');
-
-                if (sidebar && sidebar.classList.contains('active')) {
-                    sidebar.classList.remove('active');
-                    overlay.classList.remove('active');
-                    menuBtn.classList.remove('hidden');
-                }
-            }
-
-            const modal = document.getElementById('settingsModal');
-            if (modal) {
-                modal.classList.remove('hidden');
-                document.body.style.overflow = 'hidden';
-
-                // Add a subtle animation
-                setTimeout(() => {
-                    modal.style.opacity = '1';
-                }, 10);
-            } else {
-                console.error('Settings modal not found');
-            }
-        }
-
-        function closeSettingsPanel() {
-            console.log('Closing settings panel...');
-            const modal = document.getElementById('settingsModal');
-            if (modal) {
-                modal.classList.add('hidden');
-                document.body.style.overflow = '';
-                modal.style.opacity = '0';
-            }
-        }
-
         // Document ready setup
         document.addEventListener('DOMContentLoaded', function() {
             console.log('DOM loaded, setting up event listeners...');
@@ -3125,24 +2856,9 @@ function getSubjectIcon($subject)
             }
         });
 
-        // Close settings modal when clicking outside
-        document.getElementById('settingsModal')?.addEventListener('click', function(e) {
-            if (e.target === this) {
-                closeSettingsPanel();
-            }
-        });
-
         // Close modal with Escape key
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
-                // Close settings modal
-                const settingsModal = document.getElementById('settingsModal');
-                if (settingsModal && !settingsModal.classList.contains('hidden')) {
-                    closeSettingsPanel();
-                    return; // Exit early if settings was open
-                }
-
-                // Close file details modal
                 closeFileDetails();
 
                 // Also close mobile sidebar if open
@@ -3185,9 +2901,9 @@ function getSubjectIcon($subject)
                     <div class="glass-card rounded-xl sm:rounded-2xl p-6 sm:p-8 text-center max-w-md mx-auto border-theme-light">
                         <div class="animate-spin rounded-full h-12 w-12 sm:h-16 sm:w-16 border-b-4 border-theme-green mx-auto mb-4 sm:mb-6"></div>
                         <h3 class="text-lg sm:text-xl font-semibold text-white mb-2">Processing your file...</h3>
-                        <p class="text-gray-300 mb-2 text-sm sm:text-base">Tesseract OCR and enhanced AI analysis in progress</p>
+                        <p class="text-gray-300 mb-2 text-sm sm:text-base">OCR and AI analysis in progress</p>
                         <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 mt-4">
-                            <p class="text-black text-xs sm:text-sm">🖥️ Creating detailed summaries with bullet points, key concepts, and important keywords using direct Tesseract processing</p>
+                            <p class="text-black text-xs sm:text-sm">🌏 Automatic language detection and multilingual summarization</p>
                         </div>
                     </div>
                 `;
@@ -3226,7 +2942,6 @@ function getSubjectIcon($subject)
         document.addEventListener('keydown', function(e) {
             // Don't trigger shortcuts when modal is open or when typing in inputs
             if (document.getElementById('fileDetailsModal').classList.contains('hidden') &&
-                document.getElementById('settingsModal').classList.contains('hidden') &&
                 !e.target.matches('input, textarea, select')) {
 
                 // Ctrl/Cmd + U for upload
@@ -3248,12 +2963,6 @@ function getSubjectIcon($subject)
                     window.location.href = '?tab=subjects';
                 }
 
-                // Ctrl/Cmd + , for settings
-                if ((e.ctrlKey || e.metaKey) && e.key === ',') {
-                    e.preventDefault();
-                    openSettingsPanel();
-                }
-
                 // M key for mobile menu toggle
                 if (e.key === 'm' || e.key === 'M') {
                     if (window.innerWidth <= 768) {
@@ -3264,169 +2973,89 @@ function getSubjectIcon($subject)
             }
         });
 
-        // API Configuration Test Function - Updated for Tesseract
-        function testAPIConfiguration() {
-            // Show loading state
-            const testButton = event.target;
-            const originalText = testButton.textContent;
-            testButton.textContent = 'Testing...';
-            testButton.disabled = true;
+        function openSettingsPanel() {
+            console.log('Opening settings panel...');
+            const modal = document.getElementById('settingsModal');
+            if (modal) {
+                modal.classList.remove('hidden');
+                document.body.style.overflow = 'hidden';
 
-            fetch('?action=test_api')
-                .then(response => response.json())
-                .then(data => {
-                    showAPITestResults(data);
-                })
-                .catch(error => {
-                    console.error('API test error:', error);
-                    showAPITestResults({
-                        error: 'Failed to run API test: ' + error.message
-                    });
-                })
-                .finally(() => {
-                    testButton.textContent = originalText;
-                    testButton.disabled = false;
-                });
-        }
-
-        function showAPITestResults(results) {
-            // Create modal for test results
-            const modal = document.createElement('div');
-            modal.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4';
-
-            let modalContent = `
-                <div class="glass-card rounded-xl max-w-2xl w-full max-h-[90vh] overflow-hidden border-theme-light">
-                    <div class="flex items-center justify-between p-6 border-b border-theme-light">
-                        <h3 class="text-xl font-semibold text-white">🔧 API Configuration Test Results</h3>
-                        <button onclick="this.closest('.fixed').remove()" class="text-gray-300 hover:text-white text-2xl">&times;</button>
-                    </div>
-                    <div class="p-6 max-h-[60vh] overflow-auto custom-scrollbar">
-            `;
-
-            if (results.error) {
-                modalContent += `
-                    <div class="bg-red-900 bg-opacity-50 border border-red-600 rounded-lg p-4">
-                        <h4 class="text-red-300 font-medium mb-2">❌ Test Failed</h4>
-                        <p class="text-red-200">${results.error}</p>
-                    </div>
-                `;
+                // Add a subtle animation
+                setTimeout(() => {
+                    modal.style.opacity = '1';
+                }, 10);
             } else {
-                // Tesseract results
-                if (results.tesseract) {
-                    const ts = results.tesseract;
-                    const statusColor = ts.status === 'success' ? 'green' : 'red';
-                    const statusIcon = ts.status === 'success' ? '✅' : '❌';
-
-                    modalContent += `
-                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
-                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} Tesseract OCR Engine</h4>
-                            <p class="text-${statusColor}-200">${ts.message}</p>
-                            ${ts.version ? `<p class="text-${statusColor}-200 text-sm mt-1">Version: ${ts.version}</p>` : ''}
-                            ${ts.languages ? `<p class="text-${statusColor}-200 text-sm mt-1">${ts.languages}</p>` : ''}
-                        </div>
-                    `;
-                }
-
-                // Claude results
-                if (results.claude) {
-                    const cl = results.claude;
-                    const statusColor = cl.status === 'success' ? 'green' : cl.status === 'info' ? 'blue' : 'red';
-                    const statusIcon = cl.status === 'success' ? '✅' : cl.status === 'info' ? 'ℹ️' : '❌';
-
-                    modalContent += `
-                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
-                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} Claude AI API</h4>
-                            <p class="text-${statusColor}-200">${cl.message}</p>
-                        </div>
-                    `;
-                }
-
-                // Filesystem results
-                if (results.filesystem) {
-                    const fs = results.filesystem;
-                    const statusColor = fs.status === 'success' ? 'green' : 'red';
-                    const statusIcon = fs.status === 'success' ? '✅' : '❌';
-
-                    modalContent += `
-                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
-                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} File System</h4>
-                            <p class="text-${statusColor}-200">${fs.message}</p>
-                        </div>
-                    `;
-                }
-
-                // pdftotext results
-                if (results.pdftotext) {
-                    const pt = results.pdftotext;
-                    const statusColor = pt.status === 'success' ? 'green' : 'yellow';
-                    const statusIcon = pt.status === 'success' ? '✅' : '⚠️';
-
-                    modalContent += `
-                        <div class="bg-${statusColor}-900 bg-opacity-50 border border-${statusColor}-600 rounded-lg p-4 mb-4">
-                            <h4 class="text-${statusColor}-300 font-medium mb-2">${statusIcon} pdftotext Tool</h4>
-                            <p class="text-${statusColor}-200">${pt.message}</p>
-                        </div>
-                    `;
-                }
-
-                // Next steps
-                modalContent += `
-                    <div class="bg-blue-900 bg-opacity-50 border border-blue-600 rounded-lg p-4">
-                        <h4 class="text-blue-300 font-medium mb-2">📝 Next Steps</h4>
-                        <div class="text-blue-200 text-sm space-y-2">
-                `;
-
-                if (results.tesseract && results.tesseract.status !== 'success') {
-                    modalContent += `
-                        <p>• Install Tesseract OCR on your server</p>
-                        <p>• For Ubuntu/Debian: <code>sudo apt-get install tesseract-ocr tesseract-ocr-tha</code></p>
-                        <p>• For CentOS/RHEL: <code>sudo yum install tesseract</code></p>
-                        <p>• Verify installation: <code>tesseract --version</code></p>
-                    `;
-                }
-
-                if (results.tesseract && results.tesseract.status === 'success') {
-                    modalContent += `<p>• ✅ Tesseract OCR is ready to use (simplified version - no ImageMagick required!)</p>`;
-                }
-
-                modalContent += `
-                        <p>• Try uploading a test image or PDF to verify the complete workflow</p>
-                        <p>• Check the debug information if uploads still fail</p>
-                        <p>• This simplified version processes PDFs directly with Tesseract</p>
-                        </div>
-                    </div>
-                `;
+                console.error('Settings modal not found');
             }
-
-            modalContent += `
-                    </div>
-                    <div class="p-6 border-t border-theme-light">
-                        <button onclick="this.closest('.fixed').remove()" class="px-6 py-2 bg-theme-green hover:bg-theme-bright text-white rounded-lg transition-colors">
-                            Close
-                        </button>
-                    </div>
-                </div>
-            `;
-
-            modal.innerHTML = modalContent;
-            document.body.appendChild(modal);
-
-            // Close modal when clicking outside
-            modal.addEventListener('click', function(e) {
-                if (e.target === modal) {
-                    modal.remove();
-                }
-            });
         }
 
-        // Touch support for mobile devices
+        function closeSettingsPanel() {
+            console.log('Closing settings panel...');
+            const modal = document.getElementById('settingsModal');
+            if (modal) {
+                modal.classList.add('hidden');
+                document.body.style.overflow = '';
+                modal.style.opacity = '0';
+            }
+        }
+
+        // Close settings modal when clicking outside
+        document.getElementById('settingsModal')?.addEventListener('click', function(e) {
+            if (e.target === this) {
+                closeSettingsPanel();
+            }
+        });
+
+        // Touch interactions for mobile
         if ('ontouchstart' in window) {
             document.addEventListener('touchstart', function() {}, {
                 passive: true
             });
         }
 
-        console.log('All event listeners set up successfully with simplified Tesseract OCR support');
+        console.log('All event listeners set up successfully with multilingual support');
+        document.addEventListener('DOMContentLoaded', function() {
+            // Monitor all file input changes
+            document.querySelectorAll('input[type="file"]').forEach(input => {
+                input.addEventListener('change', function(e) {
+                    console.log('File selected:', e.target.files[0]);
+                    if (e.target.files[0]) {
+                        console.log('File name:', e.target.files[0].name);
+                        console.log('File size:', e.target.files[0].size, 'bytes');
+                        console.log('File type:', e.target.files[0].type);
+
+                        // Check file size (15MB limit)
+                        if (e.target.files[0].size > 15 * 1024 * 1024) {
+                            alert('File too large! Maximum size is 15MB');
+                            e.target.value = '';
+                            return;
+                        }
+                    }
+                });
+            });
+
+            // Monitor form submissions
+            document.querySelectorAll('form').forEach(form => {
+                if (form.querySelector('input[type="file"]')) {
+                    form.addEventListener('submit', function(e) {
+                        console.log('Form submitting...');
+                        console.log('Form action:', form.action);
+                        console.log('Form method:', form.method);
+                        console.log('Form enctype:', form.enctype);
+
+                        const fileInput = form.querySelector('input[type="file"]');
+                        if (fileInput && fileInput.files.length === 0) {
+                            alert('Please select a file first!');
+                            e.preventDefault();
+                            return;
+                        }
+
+                        // Show that form is submitting
+                        console.log('Form submission proceeding...');
+                    });
+                }
+            });
+        });
     </script>
 </body>
 
