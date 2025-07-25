@@ -3,7 +3,7 @@
 // Set default timezone to Thailand
 date_default_timezone_set('Asia/Bangkok');
 
-// UPDATED: Database connection with UTF-8 support and Thailand timezone and Thailand timezone
+// UPDATED: Database connection with UTF-8 support and Thailand timezone
 function getDBConnection()
 {
     $host = 'localhost';
@@ -29,28 +29,60 @@ function getDBConnection()
 }
 
 // FIXED: Save file to database with proper timestamp and UTF-8 handling
-function saveFileToDatabase($user_id, $file_name, $subject, $file_type, $original_file_path, $summary_file_path, $language = 'en')
+function saveFileToDatabase($user_id, $file_name, $subject, $file_type, $file_path, $summary_path, $language, $original_pdf_id = null, $pdf_page_number = null, $is_pdf_page = false)
 {
-    $pdo = getDBConnection();
-
-    // Check if language column exists, if not add it
     try {
-        $check_column = $pdo->query("SHOW COLUMNS FROM user_files LIKE 'language'");
-        if ($check_column->rowCount() == 0) {
-            $pdo->exec("ALTER TABLE user_files ADD COLUMN language VARCHAR(5) DEFAULT 'en' AFTER file_type");
-            error_log("Added language column to user_files table");
+        $pdo = getDBConnection();
+
+        // Ensure new columns exist
+        try {
+            $pdo->exec("ALTER TABLE user_files ADD COLUMN IF NOT EXISTS original_pdf_path VARCHAR(500) DEFAULT NULL");
+            $pdo->exec("ALTER TABLE user_files ADD COLUMN IF NOT EXISTS pdf_page_number INT DEFAULT NULL");
+            $pdo->exec("ALTER TABLE user_files ADD COLUMN IF NOT EXISTS is_pdf_page BOOLEAN DEFAULT FALSE");
+        } catch (Exception $e) {
+            // Columns might already exist
         }
+
+        // Get original PDF path if this is a PDF page
+        $original_pdf_path = null;
+        if ($original_pdf_id) {
+            $stmt = $pdo->prepare("SELECT original_file_path FROM user_files WHERE id = ? AND user_id = ?");
+            $stmt->execute([$original_pdf_id, $user_id]);
+            $result = $stmt->fetch();
+            $original_pdf_path = $result ? $result['original_file_path'] : null;
+
+            // Debug log
+            error_log("Linking PDF page to original: PDF ID=$original_pdf_id, Path=$original_pdf_path");
+        }
+
+        $sql = "INSERT INTO user_files (user_id, file_name, subject, file_type, original_file_path, summary_file_path, language, original_pdf_path, pdf_page_number, is_pdf_page, created_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+
+        $stmt = $pdo->prepare($sql);
+        $success = $stmt->execute([
+            $user_id,
+            $file_name,
+            $subject,
+            $file_type,
+            $file_path,
+            $summary_path,
+            $language,
+            $original_pdf_path,
+            $pdf_page_number,
+            $is_pdf_page ? 1 : 0
+        ]);
+
+        if ($success) {
+            $file_id = $pdo->lastInsertId();
+            error_log("Saved file to database: ID=$file_id, is_pdf_page=" . ($is_pdf_page ? 'true' : 'false'));
+            return $file_id;
+        }
+
+        return false;
     } catch (Exception $e) {
-        error_log("Error checking/adding language column: " . $e->getMessage());
+        error_log("Database save error: " . $e->getMessage());
+        return false;
     }
-
-    // FIXED: Proper SQL with current timestamp
-    $sql = "INSERT INTO user_files (user_id, file_name, subject, file_type, language, original_file_path, summary_file_path, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, NOW())";
-
-    $stmt = $pdo->prepare($sql);
-    // FIXED: Correct number of parameters (removed extra comma and NOW() is handled in SQL)
-    return $stmt->execute([$user_id, $file_name, $subject, $file_type, $language, $original_file_path, $summary_file_path]);
 }
 
 // UPDATED: Get user files with proper UTF-8 handling and safe JSON encoding
@@ -140,72 +172,258 @@ function cleanForJson($text)
     return $clean;
 }
 
-// UPDATED: Create enhanced summary text file with Thailand timezone
-function createSummaryTextFile($summary_content, $original_filename, $user_id, $subject, $language = 'en', $alt_summary = '')
+// ENHANCED: Professional summary text file creation with proper formatting
+function createSummaryTextFile($summary_content, $filename, $user_id, $subject, $language, $alt_summary = '')
 {
-    $summary_dir = "uploads/user_$user_id/$subject/summaries/";
+    try {
+        $user_folder = UPLOAD_DIR . 'user_' . $user_id . '/summaries/';
 
-    if (!file_exists($summary_dir)) {
-        mkdir($summary_dir, 0755, true);
+        // Create summaries folder if it doesn't exist
+        if (!file_exists($user_folder)) {
+            mkdir($user_folder, 0755, true);
+        }
+
+        $timestamp = time();
+        $clean_filename = preg_replace('/[^a-zA-Z0-9._-]/', '_', $filename);
+        $clean_filename = substr($clean_filename, 0, 50); // Limit length
+        $summary_filename = $timestamp . '_summary_' . $clean_filename . '.txt';
+        $summary_path = $user_folder . $summary_filename;
+
+        // Generate professional formatted content
+        $formatted_content = generateProfessionalSummary($summary_content, $filename, $subject, $language, $alt_summary);
+
+        // Write to file with UTF-8 encoding
+        $result = file_put_contents($summary_path, $formatted_content, LOCK_EX);
+
+        if ($result === false) {
+            error_log("Failed to create summary file: " . $summary_path);
+            return null;
+        }
+
+        error_log("Summary file created successfully: " . $summary_path);
+        return $summary_path;
+    } catch (Exception $e) {
+        error_log("Error creating summary file: " . $e->getMessage());
+        return null;
+    }
+}
+
+// NEW: Function to generate professionally formatted summary
+function generateProfessionalSummary($raw_summary, $filename, $subject, $language, $alt_summary = '')
+{
+    // Get current time in Thailand timezone
+    date_default_timezone_set('Asia/Bangkok');
+    $thai_time = date('Y-m-d H:i:s');
+
+    // Get subject icon
+    $subject_icons = [
+        'Physics' => '⚛️',
+        'Biology' => '🔬',
+        'Chemistry' => '🧪',
+        'Mathematics' => '🔢',
+        'Others' => '📄'
+    ];
+    $subject_icon = $subject_icons[$subject] ?? '📄';
+
+    // Language flag and name
+    $language_info = ($language === 'th') ? '🇹🇭 Thai (ภาษาไทย)' : '🇺🇸 English';
+
+    // Parse and format the AI summary content
+    $parsed_content = parseAiSummaryContent($raw_summary, $language);
+
+    if ($language === 'th') {
+        // Thai format
+        $formatted = "📄 สรุปการวิเคราะห์เอกสาร\n";
+        $formatted .= str_repeat("=", 70) . "\n\n";
+
+        $formatted .= "📋 เอกสาร: {$filename}\n";
+        $formatted .= "{$subject_icon} หมวดวิชา: {$subject}\n";
+        $formatted .= "🌐 ภาษา: {$language_info}\n";
+        $formatted .= "📅 สร้างเมื่อ: {$thai_time} +07 (เวลาประเทศไทย)\n\n";
+
+        $formatted .= str_repeat("-", 50) . "\n";
+        $formatted .= "🤖 การวิเคราะห์ด้วย AI:\n\n";
+
+        if (!empty($parsed_content['topic'])) {
+            $formatted .= "📌 หัวข้อ: {$parsed_content['topic']}\n\n";
+        }
+
+        if (!empty($parsed_content['key_points'])) {
+            $formatted .= "🔑 ประเด็นสำคัญ:\n";
+            foreach ($parsed_content['key_points'] as $point) {
+                $formatted .= "• {$point}\n";
+            }
+            $formatted .= "\n";
+        }
+
+        if (!empty($parsed_content['keywords'])) {
+            $formatted .= "🏷️ คำสำคัญ: {$parsed_content['keywords']}\n\n";
+        }
+
+        if (!empty($parsed_content['classification_reason'])) {
+            $formatted .= "📚 เหตุผลการจัดหมวด: {$parsed_content['classification_reason']}\n\n";
+        }
+
+        // Add any remaining content that wasn't parsed
+        if (!empty($parsed_content['additional_content'])) {
+            $formatted .= "📝 รายละเอียดเพิ่มเติม:\n";
+            $formatted .= $parsed_content['additional_content'] . "\n\n";
+        }
+
+        $formatted .= str_repeat("=", 70) . "\n";
+    } else {
+        // English format
+        $formatted = "📄 DOCUMENT ANALYSIS SUMMARY\n";
+        $formatted .= str_repeat("=", 70) . "\n\n";
+
+        $formatted .= "📋 Document: {$filename}\n";
+        $formatted .= "{$subject_icon} Subject: {$subject}\n";
+        $formatted .= "🌐 Language: {$language_info}\n";
+        $formatted .= "📅 Generated: {$thai_time} +07 (Thailand Time)\n\n";
+
+        $formatted .= str_repeat("-", 50) . "\n";
+        $formatted .= "🤖 AI ANALYSIS:\n\n";
+
+        if (!empty($parsed_content['topic'])) {
+            $formatted .= "📌 Topic: {$parsed_content['topic']}\n\n";
+        }
+
+        if (!empty($parsed_content['key_points'])) {
+            $formatted .= "🔑 Key Points:\n";
+            foreach ($parsed_content['key_points'] as $point) {
+                $formatted .= "• {$point}\n";
+            }
+            $formatted .= "\n";
+        }
+
+        if (!empty($parsed_content['keywords'])) {
+            $formatted .= "🏷️ Keywords: {$parsed_content['keywords']}\n\n";
+        }
+
+        if (!empty($parsed_content['classification_reason'])) {
+            $formatted .= "📚 Subject Classification: {$parsed_content['classification_reason']}\n\n";
+        }
+
+        // Add any remaining content that wasn't parsed
+        if (!empty($parsed_content['additional_content'])) {
+            $formatted .= "📝 Additional Details:\n";
+            $formatted .= $parsed_content['additional_content'] . "\n\n";
+        }
+
+        $formatted .= str_repeat("=", 70) . "\n";
     }
 
-    $summary_filename = pathinfo($original_filename, PATHINFO_FILENAME) . '_summary.txt';
-    $summary_path = $summary_dir . $summary_filename;
+    // Add bilingual summary if available (but only if it's different and substantial)
+    if (!empty($alt_summary) && strlen(trim($alt_summary)) > 50 && $alt_summary !== $raw_summary) {
+        $alt_parsed = parseAiSummaryContent($alt_summary, $language === 'th' ? 'en' : 'th');
 
-    // Set Thailand timezone for file timestamps
-    date_default_timezone_set('Asia/Bangkok');
-
-    // Create enhanced content with better formatting
-    $file_content = "📄 DOCUMENT ANALYSIS SUMMARY\n";
-    $file_content .= str_repeat("=", 50) . "\n\n";
-
-    // Add document info
-    $file_content .= "📋 Document: " . $original_filename . "\n";
-    $file_content .= "📚 Subject: " . $subject . "\n";
-    $file_content .= "🌐 Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
-    $file_content .= "📅 Generated: " . date('Y-m-d H:i:s T') . " (Thailand Time)\n\n";
-
-    $file_content .= str_repeat("-", 50) . "\n\n";
-
-    // Add main summary with better formatting
-    $file_content .= "🤖 AI ANALYSIS:\n\n";
-
-    // Clean up and format the summary content
-    $formatted_summary = $summary_content;
-
-    // Replace bullet points with better formatting
-    $formatted_summary = str_replace('•', '  •', $formatted_summary);
-
-    // Add proper spacing around sections
-    $formatted_summary = preg_replace('/\[([^\]]+)\]:/', "\n📌 $1:", $formatted_summary);
-
-    $file_content .= $formatted_summary . "\n\n";
-
-    // Add alternative language summary if available
-    if (!empty($alt_summary)) {
-        $separator = "\n" . str_repeat("-", 50) . "\n\n";
         if ($language === 'th') {
-            $file_content .= $separator . "🇺🇸 ENGLISH SUMMARY:\n\n" . $alt_summary . "\n\n";
+            $formatted .= "\n" . str_repeat("-", 50) . "\n";
+            $formatted .= "🇺🇸 English Summary:\n\n";
         } else {
-            $file_content .= $separator . "🇹🇭 สรุปภาษาไทย:\n\n" . $alt_summary . "\n\n";
+            $formatted .= "\n" . str_repeat("-", 50) . "\n";
+            $formatted .= "🇹🇭 สรุปภาษาไทย:\n\n";
+        }
+
+        if (!empty($alt_parsed['topic'])) {
+            $formatted .= ($language === 'th' ? "Topic: " : "หัวข้อ: ") . $alt_parsed['topic'] . "\n\n";
+        }
+
+        if (!empty($alt_parsed['key_points'])) {
+            $formatted .= ($language === 'th' ? "Key Points:\n" : "ประเด็นสำคัญ:\n");
+            foreach ($alt_parsed['key_points'] as $point) {
+                $formatted .= "• {$point}\n";
+            }
+            $formatted .= "\n";
+        }
+
+        $formatted .= str_repeat("=", 70) . "\n";
+    }
+
+    return $formatted;
+}
+
+// NEW: Helper function to parse AI summary content into structured components
+function parseAiSummaryContent($summary_text, $language)
+{
+    $parsed = [
+        'topic' => '',
+        'key_points' => [],
+        'keywords' => '',
+        'classification_reason' => '',
+        'additional_content' => ''
+    ];
+
+    // Clean and normalize the text
+    $text = trim($summary_text);
+    $lines = explode("\n", $text);
+
+    $current_section = '';
+    $additional_lines = [];
+
+    foreach ($lines as $line) {
+        $line = trim($line);
+        if (empty($line)) continue;
+
+        // Detect different sections based on common patterns
+        if ($language === 'th') {
+            // Thai patterns
+            if (preg_match('/^หัวข้อ\s*[:：]\s*(.+)$/u', $line, $matches)) {
+                $parsed['topic'] = trim($matches[1]);
+                $current_section = 'topic';
+            } elseif (preg_match('/^(ประเด็นสำคัญ|จุดสำคัญ|สาระสำคัญ)\s*[:：]/u', $line)) {
+                $current_section = 'key_points';
+            } elseif (preg_match('/^คำ(สำคัญ|ศัพท์สำคัญ)\s*[:：]\s*(.+)$/u', $line, $matches)) {
+                $parsed['keywords'] = trim($matches[2]);
+                $current_section = 'keywords';
+            } elseif (preg_match('/^(หมวดวิชา|การจัดหมวด)\s*[:：]\s*(.+)$/u', $line, $matches)) {
+                $parsed['classification_reason'] = trim($matches[2]);
+                $current_section = 'classification';
+            } elseif (preg_match('/^•\s*(.+)$/u', $line, $matches)) {
+                if ($current_section === 'key_points') {
+                    $parsed['key_points'][] = trim($matches[1]);
+                } else {
+                    $additional_lines[] = $line;
+                }
+            } else {
+                $additional_lines[] = $line;
+            }
+        } else {
+            // English patterns
+            if (preg_match('/^Topic\s*[:：]\s*(.+)$/i', $line, $matches)) {
+                $parsed['topic'] = trim($matches[1]);
+                $current_section = 'topic';
+            } elseif (preg_match('/^Key\s+Points\s*[:：]/i', $line)) {
+                $current_section = 'key_points';
+            } elseif (preg_match('/^Keywords?\s*[:：]\s*(.+)$/i', $line, $matches)) {
+                $parsed['keywords'] = trim($matches[1]);
+                $current_section = 'keywords';
+            } elseif (preg_match('/^Subject\s+Classification\s*[:：]\s*(.+)$/i', $line, $matches)) {
+                $parsed['classification_reason'] = trim($matches[1]);
+                $current_section = 'classification';
+            } elseif (preg_match('/^•\s*(.+)$/', $line, $matches)) {
+                if ($current_section === 'key_points') {
+                    $parsed['key_points'][] = trim($matches[1]);
+                } else {
+                    $additional_lines[] = $line;
+                }
+            } else {
+                $additional_lines[] = $line;
+            }
         }
     }
 
-    // Add metadata footer
-    $file_content .= str_repeat("=", 50) . "\n";
-    $file_content .= "📊 TECHNICAL INFO:\n";
-    $file_content .= "  • AI Analysis: Claude (Anthropic)\n";
-    $file_content .= "  • Processing Language: " . ($language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
-    $file_content .= "  • Generated Time: " . date('l, F j, Y \a\t g:i A T') . "\n";
-    $file_content .= str_repeat("=", 50) . "\n";
-
-    // FIXED: Write file with explicit UTF-8 encoding
-    if (file_put_contents($summary_path, $file_content, LOCK_EX) === false) {
-        error_log("Failed to write summary file: $summary_path");
-        return false;
+    // If we couldn't parse structured content, treat everything as additional content
+    if (empty($parsed['topic']) && empty($parsed['key_points']) && empty($parsed['keywords'])) {
+        $parsed['additional_content'] = $text;
+    } else {
+        // Add any unparsed lines as additional content
+        if (!empty($additional_lines)) {
+            $parsed['additional_content'] = implode("\n", $additional_lines);
+        }
     }
 
-    return $summary_path;
+    return $parsed;
 }
 
 // Helper function to format file sizes
@@ -280,77 +498,106 @@ function deleteUserFile($file_id, $user_id)
     return false;
 }
 
-// UPDATED: Serve original file with better headers and UTF-8 support
+function ensurePdfColumns()
+{
+    try {
+        $pdo = getDBConnection();
+
+        // Check and add columns if they don't exist
+        $columns_to_add = [
+            'original_pdf_path' => 'ALTER TABLE user_files ADD COLUMN original_pdf_path VARCHAR(500) DEFAULT NULL',
+            'pdf_page_number' => 'ALTER TABLE user_files ADD COLUMN pdf_page_number INT DEFAULT NULL',
+            'is_pdf_page' => 'ALTER TABLE user_files ADD COLUMN is_pdf_page BOOLEAN DEFAULT FALSE'
+        ];
+
+        foreach ($columns_to_add as $column => $sql) {
+            $check = $pdo->query("SHOW COLUMNS FROM user_files LIKE '$column'");
+            if ($check->rowCount() == 0) {
+                $pdo->exec($sql);
+                error_log("Added column: $column");
+            }
+        }
+    } catch (Exception $e) {
+        error_log("Error adding PDF columns: " . $e->getMessage());
+    }
+}
+
+// Call this function when initializing your database connection
+ensurePdfColumns();
+
 function serveOriginalFile($file_id, $user_id)
 {
-    $pdo = getDBConnection();
-    $sql = "SELECT * FROM user_files WHERE id = ? AND user_id = ?";
-    $stmt = $pdo->prepare($sql);
-    $stmt->execute([$file_id, $user_id]);
-    $file = $stmt->fetch();
+    error_log("=== Serving original file ===");
+    error_log("File ID: $file_id, User ID: $user_id");
 
-    if (!$file) {
-        header('HTTP/1.0 404 Not Found');
-        echo 'File not found';
-        exit;
-    }
+    try {
+        $pdo = getDBConnection();
+        $sql = "SELECT * FROM user_files WHERE id = ? AND user_id = ?";
+        $stmt = $pdo->prepare($sql);
+        $stmt->execute([$file_id, $user_id]);
+        $file = $stmt->fetch();
 
-    if (!file_exists($file['original_file_path'])) {
-        header('HTTP/1.0 404 Not Found');
-        echo 'File not found on disk';
-        exit;
-    }
-
-    $file_path = $file['original_file_path'];
-    $file_extension = strtolower(pathinfo($file_path, PATHINFO_EXTENSION));
-    $file_size = filesize($file_path);
-
-    // Clear any previous output
-    if (ob_get_level()) {
-        ob_end_clean();
-    }
-
-    // Set appropriate headers based on file type
-    if ($file_extension === 'pdf') {
-        header('Content-Type: application/pdf');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif (in_array($file_extension, ['jpg', 'jpeg'])) {
-        header('Content-Type: image/jpeg');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif ($file_extension === 'png') {
-        header('Content-Type: image/png');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif ($file_extension === 'webp') {
-        header('Content-Type: image/webp');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } elseif ($file_extension === 'gif') {
-        header('Content-Type: image/gif');
-        header('Content-Disposition: inline; filename="' . basename($file['file_name']) . '"');
-    } else {
-        header('Content-Type: application/octet-stream');
-        header('Content-Disposition: attachment; filename="' . basename($file['file_name']) . '"');
-    }
-
-    // Set content length and cache headers
-    header('Content-Length: ' . $file_size);
-    header('Cache-Control: private, max-age=3600');
-
-    // For large files, read in chunks
-    if ($file_size > 10 * 1024 * 1024) { // > 10MB
-        $fp = fopen($file_path, 'rb');
-        if ($fp) {
-            while (!feof($fp)) {
-                echo fread($fp, 8192); // 8KB chunks
-                if (connection_aborted()) break;
-                flush();
-            }
-            fclose($fp);
+        if (!$file) {
+            error_log("File not found in database");
+            http_response_code(404);
+            echo "File not found";
+            return;
         }
-    } else {
-        readfile($file_path);
-    }
 
-    exit;
+        // ALWAYS serve the original file path (which contains the PDF with original name)
+        $file_to_serve = $file['original_file_path'];
+
+        error_log("Serving file: " . $file_to_serve);
+        error_log("File type: " . $file['file_type']);
+
+        if (!file_exists($file_to_serve)) {
+            error_log("Physical file not found: " . $file_to_serve);
+            http_response_code(404);
+            echo "Physical file not found";
+            return;
+        }
+
+        // Determine content type
+        $file_extension = strtolower(pathinfo($file_to_serve, PATHINFO_EXTENSION));
+        $content_types = [
+            'pdf' => 'application/pdf',
+            'jpg' => 'image/jpeg',
+            'jpeg' => 'image/jpeg',
+            'png' => 'image/png',
+            'gif' => 'image/gif',
+            'webp' => 'image/webp'
+        ];
+
+        $content_type = $content_types[$file_extension] ?? 'application/octet-stream';
+
+        // Set headers for inline viewing
+        header('Content-Type: ' . $content_type);
+        header('Content-Length: ' . filesize($file_to_serve));
+        header('Content-Disposition: inline; filename="' . basename($file_to_serve) . '"');
+
+        // Serve the file
+        readfile($file_to_serve);
+
+        error_log("File served successfully");
+    } catch (Exception $e) {
+        error_log("Error serving file: " . $e->getMessage());
+        http_response_code(500);
+        echo "Error serving file";
+    }
+}
+
+function getMimeType($extension)
+{
+    $mime_types = [
+        'pdf' => 'application/pdf',
+        'jpg' => 'image/jpeg',
+        'jpeg' => 'image/jpeg',
+        'png' => 'image/png',
+        'gif' => 'image/gif',
+        'webp' => 'image/webp'
+    ];
+
+    return $mime_types[$extension] ?? 'application/octet-stream';
 }
 
 // UPDATED: Serve summary file with UTF-8 support
@@ -375,3 +622,5 @@ function serveSummaryFile($file_id, $user_id)
 
     readfile($file['summary_file_path']);
 }
+
+?>s
