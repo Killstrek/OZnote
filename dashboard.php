@@ -1,13 +1,11 @@
 <?php
 session_start();
 
-
-
 header('Content-Type: text/html; charset=UTF-8');
 mb_internal_encoding('UTF-8');
 
 // Include authentication functions
-require_once 'auth.php'; // This should contain your login functions
+require_once 'auth.php';
 
 // AUTHENTICATION CHECK - Redirect if not logged in
 if (!isLoggedIn()) {
@@ -15,13 +13,24 @@ if (!isLoggedIn()) {
     exit();
 }
 
-// Load secure configuration and database FIRST
+// Load environment variables FIRST
+require_once 'env.php';
+loadEnv();
+
+// Load secure configuration and database
 require_once 'config.php';
 require_once 'database.php';
 
-// Configuration
+// Configuration using environment variables
 define('UPLOAD_DIR', 'uploads/');
-define('CLAUDE_API_KEY', '');
+define('CLAUDE_API_KEY', env('CLAUDE_API_KEY', ''));
+define('UPLOAD_MAX_SIZE', env('UPLOAD_MAX_SIZE', 15728640)); // 15MB default
+define('DEBUG_MODE', env('DEBUG_MODE', false));
+
+// Optional: Validate critical config
+if (empty(CLAUDE_API_KEY)) {
+    error_log('WARNING: CLAUDE_API_KEY not configured in .env file');
+}
 
 // Enhanced cleanForJson function (defined early to avoid conflicts)
 function cleanForJsonSafe($text)
@@ -643,54 +652,56 @@ function processWithClaudeOCRandNLP($file_path, $filename)
     }
 
     // FIXED: Improved prompt with clearer instructions
-    $prompt = "Analyze this educational document image and extract text with subject classification.
+    // FIXED: Simplified prompt without problematic emojis
+    $prompt = "Analyze this educational document image and return ONLY a valid JSON object.
 
 Document: {$filename}
 
-CLASSIFICATION GUIDELINES:
-🔬 **Biology**: Living organisms, cells, genetics, anatomy, ecology, evolution, biochemistry, microbiology, botany, zoology, human body systems, diseases, medical topics
-🧪 **Chemistry**: Chemical reactions, molecules, atoms, periodic table, compounds, chemical formulas, organic/inorganic chemistry, chemical equations, lab procedures
-⚛️ **Physics**: Motion, energy, forces, electricity, magnetism, waves, thermodynamics, mechanics, optics, nuclear physics, quantum physics, mathematical physics
-🔢 **Mathematics**: Numbers, equations, calculus, algebra, geometry, statistics, trigonometry, mathematical proofs, mathematical symbols, graphs, mathematical formulas
-📄 **Others**: Languages, literature, history, social studies, art, music, general knowledge, mixed subjects, unclear content
+CLASSIFICATION RULES:
+- Biology: Living organisms, cells, genetics, anatomy, ecology, medical topics
+- Chemistry: Chemical reactions, molecules, formulas, compounds, lab procedures  
+- Physics: Motion, energy, forces, electricity, waves, mechanics, optics
+- Mathematics: Numbers, equations, calculus, algebra, geometry, statistics
+- Others: Languages, literature, history, mixed subjects, unclear content
 
-STRICT CLASSIFICATION RULES:
-- If document contains primarily mathematical equations/formulas → Mathematics
-- If document discusses living things, body parts, cells, diseases → Biology  
-- If document has chemical formulas, reactions, molecular structures → Chemistry
-- If document covers forces, energy, motion, electrical concepts → Physics
-- If unsure or mixed content → Others
-- Medical/health topics → Biology
-- Engineering calculations → Physics or Mathematics (choose based on primary focus)
-
-Tasks:
-1. Extract ALL visible text exactly as shown
-2. Detect language (Thai or English)
-3. Classify subject using STRICT rules above - be very careful!
-4. Create educational summary in the SAME language as the detected content
-
-Respond with ONLY valid JSON in this format:
-
-For Thai content:
+OUTPUT FORMAT - Return only this JSON:
 {
-    \"language\": \"th\",
-    \"subject\": \"Biology\",
-    \"extracted_text\": \"[all text from image]\",
-    \"summary\": \"หัวข้อ: [topic]\\n\\nสาระสำคัญ:\\n• [point 1]\\n• [point 2]\\n\\nคำศัพท์สำคัญ: [keywords]\\n\\nหมวดวิชา: [subject with reasoning in Thai]\"
+    \"language\": \"th\" or \"en\",
+    \"subject\": \"Physics\" or \"Biology\" or \"Chemistry\" or \"Mathematics\" or \"Others\", 
+    \"extracted_text\": \"[exact text from image]\",
+    \"summary\": \"[clean educational summary in detected language]\"
 }
+
+SUMMARY GUIDELINES:
+For Thai content:
+หัวข้อ: [topic name]
+
+สาระสำคัญ:
+- [key point 1]
+- [key point 2] 
+- [key point 3]
+
+คำศัพท์สำคัญ: [important terms]
+
+หมวดวิชา: [subject with reasoning]
 
 For English content:
-{
-    \"language\": \"en\", 
-    \"subject\": \"Physics\",
-    \"extracted_text\": \"[all text from image]\",
-    \"summary\": \"Topic: [topic]\\n\\nKey Points:\\n• [point 1]\\n• [point 2]\\n\\nKeywords: [keywords]\\n\\nSubject Classification: [subject with reasoning in English]\"
-}
+Topic: [topic name]
+
+Key Points:
+- [key point 1]
+- [key point 2]
+- [key point 3]
+
+Keywords: [important terms]
+
+Subject: [subject with reasoning]
 
 IMPORTANT: 
-- Provide summary ONLY in the detected language (no dual summaries)
-- Choose subject classification very carefully based on PRIMARY content focus
-- When in doubt, use 'Others'";
+- Use simple text formatting only (no emojis)
+- Use dashes (-) for bullet points
+- Keep summary clear and educational
+- Return ONLY valid JSON";
 
     // FIXED: Updated request structure with proper error handling
     $request_data = [
@@ -1604,18 +1615,11 @@ function updatePdfAnalysis($pdf_file_id, $user_id, $analysis)
             $update_stmt->execute([$new_language, $pdf_file_id]);
         }
 
-        // Update summary file
-        if (!empty($pdf_file['summary_file_path']) && file_exists($pdf_file['summary_file_path'])) {
-            $updated_summary = "📄 PDF Document: " . $pdf_file['file_name'] . "\n\n";
-            $updated_summary .= "🤖 AI Analysis Results:\n";
-            $updated_summary .= $analysis['summary'] . "\n\n";
-            $updated_summary .= "Subject Classification: " . $new_subject . "\n";
-            $updated_summary .= "Language: " . ($new_language === 'th' ? 'Thai (ภาษาไทย)' : 'English') . "\n";
-            $updated_summary .= "Analysis completed: " . date('Y-m-d H:i:s') . "\n\n";
-            $updated_summary .= "Debug: " . ($analysis['debug'] ?? 'Analysis completed successfully');
-
-            file_put_contents($pdf_file['summary_file_path'], $updated_summary);
-            error_log("Updated PDF summary file with analysis results");
+        // FIXED: Create clean summary without emoji issues
+        if (!empty($pdf_file['summary_file_path'])) {
+            $cleanSummary = createCleanSummary($analysis, $pdf_file['file_name'], $new_language);
+            file_put_contents($pdf_file['summary_file_path'], $cleanSummary);
+            error_log("Updated PDF summary file with clean formatting");
         }
 
         return true;
@@ -1814,6 +1818,123 @@ function getSubjectIcon($subject)
         'Others' => '📄'
     ];
     return $icons[$subject] ?? '📄';
+}
+// Add this function after your existing functions (around line 300)
+function formatSummaryForPreview($summaryText, $maxLength = 200)
+{
+    if (empty($summaryText)) {
+        return 'No summary available';
+    }
+
+    // Clean up the text
+    $formatted = $summaryText;
+
+    // Remove excessive metadata from preview
+    $formatted = preg_replace('/Subject Classification:.*$/s', '', $formatted);
+    $formatted = preg_replace('/Language:.*$/s', '', $formatted);
+    $formatted = preg_replace('/Analysis completed:.*$/s', '', $formatted);
+
+    // Add line breaks before key sections for preview
+    $formatted = preg_replace('/([📄📚🔑🏷️📋])/u', "\n$1", $formatted);
+    $formatted = preg_replace('/([•·])/u', "\n$1", $formatted);
+
+    // Clean up whitespace
+    $formatted = preg_replace('/\s+/', ' ', $formatted);
+    $formatted = preg_replace('/\n\s*\n/', "\n", $formatted);
+    $formatted = trim($formatted);
+
+    // Truncate for preview
+    if (mb_strlen($formatted, 'UTF-8') > $maxLength) {
+        $formatted = mb_substr($formatted, 0, $maxLength, 'UTF-8') . '...';
+    }
+
+    return $formatted;
+}
+// Add this function after your existing functions (around line 300)
+function createCleanSummary($analysis, $filename, $language)
+{
+    $isThaiLanguage = ($language === 'th');
+
+    // Create a clean, well-formatted summary without emojis
+    $summary = "";
+
+    // Header section - FIXED: Only 5 characters
+    $summary .= "=====\n";
+    $summary .= ($isThaiLanguage ? "สรุปการวิเคราะห์เอกสาร" : "Document Analysis Summary") . "\n";
+    $summary .= "=====\n\n";
+
+    // File info
+    $summary .= ($isThaiLanguage ? "ไฟล์: " : "File: ") . $filename . "\n";
+    $summary .= ($isThaiLanguage ? "หมวดวิชา: " : "Subject: ") . $analysis['subject'] . "\n";
+    $summary .= ($isThaiLanguage ? "ภาษา: " : "Language: ");
+    $summary .= $isThaiLanguage ? "ภาษาไทย" : "English";
+    $summary .= "\n";
+    $summary .= ($isThaiLanguage ? "วันที่วิเคราะห์: " : "Analyzed: ") . date('Y-m-d H:i:s') . "\n\n";
+
+    // Main content - FIXED: Only 5 characters
+    $summary .= "-----\n";
+    $summary .= ($isThaiLanguage ? "ผลการวิเคราะห์ด้วย AI" : "AI Analysis Results") . "\n";
+    $summary .= "-----\n\n";
+
+    // Add the Claude summary content (cleaned)
+    if (!empty($analysis['summary'])) {
+        $cleanSummary = cleanSummaryContent($analysis['summary']);
+        $summary .= $cleanSummary . "\n\n";
+    }
+
+    // Footer - FIXED: Only 5 characters
+    $summary .= "=====\n";
+    $summary .= ($isThaiLanguage ? "ข้อมูลเทคนิค" : "Technical Information") . "\n";
+    $summary .= "=====\n";
+    $summary .= ($isThaiLanguage ? "เครื่องมือ AI: " : "AI Tool: ") . "Claude (Anthropic)\n";
+    $summary .= ($isThaiLanguage ? "ภาษาที่ตรวจพบ: " : "Detected Language: ");
+    $summary .= $isThaiLanguage ? "ภาษาไทย" : "English";
+    $summary .= "\n";
+    $summary .= ($isThaiLanguage ? "เวลาที่สร้าง: " : "Generated: ") . date('l, F j, Y \a\t g:i A O') . "\n";
+    $summary .= "=====";
+
+    return $summary;
+}
+
+// Helper function to clean summary content
+function cleanSummaryContent($summaryText)
+{
+    if (empty($summaryText)) {
+        return "No summary available";
+    }
+
+    // Remove problematic emojis and replace with clean text
+    $cleaned = $summaryText;
+
+    // Replace emoji headers with clean text
+    $emojiReplacements = [
+        '/[📄📚🔑🏷️📋⚛️🧪🔬🔢🤖]/u' => '',
+        '/[•·▪▫]/u' => '-',
+        '/หัวข้อ:/u' => 'หัวข้อ:',
+        '/สาระสำคัญ:/u' => 'สาระสำคัญ:',
+        '/คำศัพท์สำคัญ:/u' => 'คำศัพท์สำคัญ:',
+        '/การจัดหมวดวิชา:/u' => 'หมวดวิชา:',
+        '/Topic:/u' => 'Topic:',
+        '/Key Points:/u' => 'Key Points:',
+        '/Keywords:/u' => 'Keywords:',
+        '/Subject Classification:/u' => 'Subject:',
+    ];
+
+    foreach ($emojiReplacements as $pattern => $replacement) {
+        $cleaned = preg_replace($pattern, $replacement, $cleaned);
+    }
+
+    // FIXED: Replace long separators with short ones
+    $cleaned = preg_replace('/={10,}/', '=====', $cleaned);
+    $cleaned = preg_replace('/-{10,}/', '-----', $cleaned);
+
+    // Clean up whitespace and formatting
+    $cleaned = preg_replace('/\s+/', ' ', $cleaned);
+    $cleaned = str_replace(['\n', '\\n'], "\n", $cleaned);
+    $cleaned = preg_replace('/\n\s*\n/', "\n\n", $cleaned);
+    $cleaned = trim($cleaned);
+
+    return $cleaned;
 }
 
 ?>
@@ -2301,6 +2422,94 @@ function getSubjectIcon($subject)
                 min-height: 44px;
             }
         }
+
+        /* Better text formatting for summaries */
+        .whitespace-pre-wrap {
+            white-space: pre-wrap;
+        }
+
+        .whitespace-pre-line {
+            white-space: pre-line;
+        }
+
+        /* Improved line spacing for summary content */
+        #modalSummary {
+            line-height: 1.6;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        /* Better spacing for emoji sections */
+        #modalSummary:has(span) {
+            font-variant-emoji: text;
+        }
+
+        /* Responsive text sizing for different screens */
+        @media (max-width: 640px) {
+            #modalSummary {
+                font-size: 0.875rem;
+                line-height: 1.5;
+            }
+        }
+
+        @media (min-width: 641px) {
+            #modalSummary {
+                font-size: 1rem;
+                line-height: 1.6;
+            }
+        }
+
+        /* Better list formatting */
+        .line-clamp-4 {
+            display: -webkit-box;
+            -webkit-line-clamp: 4;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        /* Ensure proper emoji display */
+        span[role="img"],
+        .emoji {
+            display: inline-block;
+            vertical-align: middle;
+            margin-right: 0.25rem;
+        }
+
+        /* Add to your existing CSS */
+        #modalSummary {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+        }
+
+        #modalSummary .summary-header {
+            font-weight: bold;
+            margin: 1rem 0;
+            text-align: center;
+            color: #2d3748;
+        }
+
+        #modalSummary .summary-separator {
+            margin: 0.5rem 0;
+            opacity: 0.7;
+            text-align: center;
+            font-family: monospace;
+        }
+
+        #modalSummary strong {
+            font-weight: bold;
+            color: #2d3748;
+            display: block;
+            margin-top: 1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        /* Better bullet point styling */
+        #modalSummary br+ ::after {
+            content: "";
+            margin-right: 0.5rem;
+        }
     </style>
 </head>
 
@@ -2688,6 +2897,7 @@ function getSubjectIcon($subject)
                                             </button>
                                         </div>
 
+                                        <!-- In the file cards section, replace the summary preview with: -->
                                         <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 mb-3 sm:mb-4">
                                             <p class="text-xs sm:text-sm text-black font-medium mb-1 sm:mb-2 flex items-center">
                                                 🤖 AI Summary
@@ -2697,15 +2907,20 @@ function getSubjectIcon($subject)
                                                     <span class="ml-2 px-2 py-1 rounded text-xs bg-green-100 text-green-800">English</span>
                                                 <?php endif; ?>
                                             </p>
-                                            <p class="text-xs sm:text-sm text-black line-clamp-3">
+                                            <!-- IMPROVED: Better preview formatting -->
+                                            <div class="text-xs sm:text-sm text-black line-clamp-4 whitespace-pre-line leading-relaxed">
                                                 <?php
+                                                $preview_text = '';
                                                 if (!empty($file['summary_file_path']) && file_exists($file['summary_file_path'])) {
-                                                    echo htmlspecialchars(substr(file_get_contents($file['summary_file_path']), 0, 200) . '...');
+                                                    $full_summary = file_get_contents($file['summary_file_path']);
+                                                    // Clean and format for preview
+                                                    $preview_text = formatSummaryForPreview($full_summary, 150);
                                                 } else {
-                                                    echo htmlspecialchars($file['summary'] ?? 'No summary available');
+                                                    $preview_text = formatSummaryForPreview($file['summary'] ?? 'No summary available', 150);
                                                 }
+                                                echo htmlspecialchars($preview_text);
                                                 ?>
-                                            </p>
+                                            </div>
                                         </div>
 
                                         <div class="flex items-center justify-between">
@@ -2759,7 +2974,7 @@ function getSubjectIcon($subject)
 
             <!-- Modal Content -->
             <div class="p-4 sm:p-6 max-h-[50vh] sm:max-h-[60vh] overflow-auto custom-scrollbar">
-                <!-- Summary Tab -->
+                <!-- Summary Tab - IMPROVED FORMATTING -->
                 <div id="summaryContent" class="tab-content">
                     <div class="space-y-4 sm:space-y-6">
                         <div>
@@ -2770,7 +2985,8 @@ function getSubjectIcon($subject)
                                 </span>
                             </h4>
                             <div class="bg-theme-bright bg-opacity-20 rounded-lg p-3 sm:p-4 border-l-4 border-theme-green">
-                                <p id="modalSummary" class="text-black text-sm sm:text-base leading-relaxed"></p>
+                                <!-- IMPROVED: Use pre-wrap to preserve formatting and add proper spacing -->
+                                <div id="modalSummary" class="text-black text-sm sm:text-base leading-relaxed whitespace-pre-wrap"></div>
                             </div>
                         </div>
 
@@ -3035,6 +3251,37 @@ function getSubjectIcon($subject)
             transform: translateX(2px);
             transition: all 0.2s ease;
         }
+
+        #modalSummary {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            line-height: 1.6;
+            word-wrap: break-word;
+            overflow-wrap: break-word;
+            white-space: pre-line;
+        }
+
+        /* Better formatting for section headers */
+        #modalSummary:contains("===") {
+            font-weight: normal;
+        }
+
+        /* Monospace font for technical sections */
+        .summary-header {
+            font-weight: bold;
+            margin: 1rem 0 0.5rem 0;
+        }
+
+        .summary-separator {
+            margin: 0.5rem 0;
+            opacity: 0.7;
+        }
+
+        /* Ensure consistent text rendering */
+        .text-content {
+            text-rendering: optimizeLegibility;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
     </style>
 
     <script>
@@ -3094,7 +3341,6 @@ function getSubjectIcon($subject)
         function openFileDetails(fileId) {
             console.log('Opening file details for ID:', fileId);
 
-            // Store the current file ID globally
             currentModalFileId = fileId;
 
             const file = fileData.find(f => f.id == fileId);
@@ -3105,16 +3351,26 @@ function getSubjectIcon($subject)
             }
 
             try {
-                // Get language information
                 const fileLanguage = file.language || 'en';
                 const isThaiLanguage = fileLanguage === 'th';
 
                 // Update modal content
                 document.getElementById('modalFileName').textContent = file.name || 'Unknown File';
                 document.getElementById('modalSubject').textContent = file.subject || 'Unknown Subject';
-                document.getElementById('modalSummary').textContent = file.full_summary || (isThaiLanguage ? 'ไม่มีข้อมูลสรุป' : 'No summary available');
 
-                // Update language badge and info
+                // IMPROVED: Format the summary with proper line breaks and spacing
+                const formattedSummary = formatSummaryText(file.full_summary || file.summary || '');
+                const summaryElement = document.getElementById('modalSummary');
+
+
+                // Check if formatted summary contains HTML tags
+                if (formattedSummary.includes('<')) {
+                    summaryElement.innerHTML = formattedSummary;
+                } else {
+                    summaryElement.textContent = formattedSummary;
+                }
+
+                // Update language badges and info (rest remains the same)
                 const languageBadge = document.getElementById('modalLanguageBadge');
                 const languageInfo = document.getElementById('modalLanguageInfo');
                 const summaryLanguage = document.getElementById('modalSummaryLanguage');
@@ -3153,24 +3409,19 @@ function getSubjectIcon($subject)
                 document.getElementById('modalStatus').textContent = 'Status: ' + (file.status || 'Completed');
                 document.getElementById('modalSize').textContent = 'File ID: ' + file.id;
 
-                // Reset the file preview container to default state
+                // Reset file preview
                 const filePreviewContainer = document.getElementById('filePreviewContainer');
                 if (filePreviewContainer) {
                     filePreviewContainer.innerHTML = `
-                        <div class="text-center py-8">
-                            <div class="text-theme-medium text-4xl mb-4">📄</div>
-                            <p class="text-white mb-4">${isThaiLanguage ? 'เปลี่ยนมาที่แท็บนี้เพื่อดูไฟล์ต้นฉบับ' : 'Switch to this tab to view the original file'}</p>
-                        </div>
-                    `;
+                <div class="text-center py-8">
+                    <div class="text-theme-medium text-4xl mb-4">📄</div>
+                    <p class="text-white mb-4">${isThaiLanguage ? 'เปลี่ยนมาที่แท็บนี้เพื่อดูไฟล์ต้นฉบับ' : 'Switch to this tab to view the original file'}</p>
+                </div>
+            `;
                 }
 
-                // Set up action buttons
                 setupModalActions(file.id);
-
-                // Reset to summary tab
                 switchTab('summary');
-
-                // Show modal
                 document.getElementById('fileDetailsModal').classList.remove('hidden');
                 document.body.style.overflow = 'hidden';
 
@@ -3179,6 +3430,48 @@ function getSubjectIcon($subject)
                 console.error('Error opening modal:', error);
                 alert('Error opening file details');
             }
+        }
+
+        // FIXED: Simplified formatting without emoji issues
+        function formatSummaryText(summaryText) {
+            if (!summaryText) {
+                return 'No summary available';
+            }
+
+            // Clean up the text while preserving intentional formatting
+            let formatted = summaryText
+                // Remove problematic characters first
+                .replace(/[�]/g, '')
+                // Normalize line endings
+                .replace(/\r\n/g, '\n')
+                .replace(/\r/g, '\n')
+                // FIXED: Replace any long separators with short ones
+                .replace(/={10,}/g, '=====')
+                .replace(/-{10,}/g, '-----')
+                // FIXED: Ensure separators are on their own lines
+                .replace(/(.)(=====)/g, '$1\n$2') // Add newline before =====
+                .replace(/(=====)(.)/g, '$1\n$2') // Add newline after =====
+                .replace(/(.)(-----)/g, '$1\n$2') // Add newline before -----
+                .replace(/(-----)(.)/g, '$1\n$2') // Add newline after -----
+                // FIXED: Ensure bullet points start on new lines
+                .replace(/([^\n])(-\s)/g, '$1\n$2') // Dash bullets
+                .replace(/([^\n])(•\s)/g, '$1\n$2') // Bullet points
+                // FIXED: Ensure section headers start on new lines
+                .replace(/([^\n])(หัวข้อ:|สาระสำคัญ:|คำศัพท์สำคัญ:|หมวดวิชา:|Topic:|Key Points:|Keywords:|Subject:)/g, '$1\n\n$2')
+                // Clean up excessive whitespace but preserve intentional line breaks
+                .replace(/[ \t]+/g, ' ') // Replace multiple spaces/tabs with single space
+                .replace(/\n[ \t]+/g, '\n') // Remove spaces at start of lines
+                .replace(/[ \t]+\n/g, '\n') // Remove spaces at end of lines
+                // Clean up excessive line breaks (more than 3 becomes 2)
+                .replace(/\n{4,}/g, '\n\n')
+                .replace(/\n{3}/g, '\n\n')
+                // FIXED: Ensure proper spacing around separators
+                .replace(/\n*=====\n*/g, '\n\n=====\n')
+                .replace(/\n*-----\n*/g, '\n\n-----\n')
+                // Trim and ensure we don't start/end with excessive line breaks
+                .trim();
+
+            return formatted;
         }
 
         // Updated loadFileOptions function to handle language-specific text
